@@ -1,4 +1,4 @@
-// ── index.mjs  (SyncBoard Pro — server) ──────────────────────────────────────
+
 import express  from "express";
 import http     from "http";
 import { Server } from "socket.io";
@@ -17,7 +17,7 @@ import {
   verifyProPinWithWorker,
   parseAllowedOrigins,
   isOriginAllowed,
-} from "./lib/security.mjs";
+} from "./security.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -67,12 +67,8 @@ app.use(rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 }));
-
-// Health check
-app.get("/", (_, res) => res.send("SyncBoard Pro server running ✓"));
-
-// Contact form (store messages server-side, no public email)
-const CONTACT_MESSAGE_LIMIT = 500;
+ app.get("/", (_, res) => res.send("SyncBoard Pro server running ✓"));
+ const CONTACT_MESSAGE_LIMIT = 500;
 const contactMessages = [];
 
 app.post("/api/contact", async (req, res) => {
@@ -159,9 +155,7 @@ app.post("/api/contact", async (req, res) => {
     return res.status(500).json({ error: "Failed to send email." });
   }
 });
-
-// ── MONGODB CONNECTION ────────────────────────────────────────────────────────
-const MONGO_URI = process.env.MONGO_URI;
+ const MONGO_URI = process.env.MONGO_URI;
 if (IS_DEV) devLog("[startup] MONGO_URI:", MONGO_URI ? "configured" : "missing");
 let mongoConnected = false;
 
@@ -201,13 +195,10 @@ async function saveRoomToDB(workspaceName) {
   
   const ws = workspaces[workspaceName];
   if (!ws) return;
-  
-  // Safety net: if creatorEmail is undefined, try to find an admin to use as creator
-  let creatorEmailToSave = ws.creatorEmail;
+   let creatorEmailToSave = ws.creatorEmail;
   if (!creatorEmailToSave) {
     console.warn(`[saveRoomToDB] ⚠️  WARNING: ws.creatorEmail is undefined for workspace "${workspaceName}"!`);
-    // Try to find an admin member to use as creator
-    const adminMember = ws.members.find(m => m.role === "admin");
+     const adminMember = ws.members.find(m => m.role === "admin");
     if (adminMember && adminMember.email) {
       creatorEmailToSave = adminMember.email;
       console.log(`[saveRoomToDB] 🔧 Using admin member as creator: "${creatorEmailToSave}"`);
@@ -272,7 +263,7 @@ async function loadRoomFromDB(workspaceName) {
   }
 }
 
-// ── SAVE USER DATA TO DB ──────────────────────────────────────────────────────
+
 async function saveUserToDB(email) {
   if (!mongoConnected) {
     console.warn("[saveUserToDB] ⚠️  MongoDB not connected, CANNOT save user data!");
@@ -313,7 +304,6 @@ async function saveUserToDB(email) {
   }
 }
 
-// ── LOAD USER DATA FROM DB ────────────────────────────────────────────────────
 async function loadUserFromDB(email) {
   if (!mongoConnected) {
     console.log("[loadUserFromDB] MongoDB not connected");
@@ -348,21 +338,9 @@ async function loadUserFromDB(email) {
     return null;
   }
 }
-
-// ── IN-MEMORY STORE ───────────────────────────────────────────────────────────
-// workspaces[workspaceName] = {
-//   password, projectName, creatorEmail,
-//   tasks:   [],
-//   history: [],
-//   members: [{ name, role, joinedAt }],
-//   sockets: Map<socketId, { name, role, email }>
-// }
-const workspaces  = {};
+ const workspaces  = {};
 const MAX_HISTORY = Infinity;
-
-// ── IN-MEMORY USER STORE ──────────────────────────────────────────────────────
-// users[email] = { passwordHash, name, taskCount, resetAt, taskIds, isPro, proPin, proActivatedAt, proExpiresAt }
-const users = {};
+ const users = {};
 
 const FREE_TASK_LIMIT = 3;
 const PRO_TASK_LIMIT  = 3000;
@@ -515,7 +493,6 @@ async function ensureUserLoaded(email) {
   return users[key];
 }
 
-// Async version that waits for DB save
 async function incrementUserTaskCountAsync(email, taskId) {
   const key  = email.toLowerCase().trim();
   const user = await ensureUserLoaded(email);
@@ -527,8 +504,7 @@ async function incrementUserTaskCountAsync(email, taskId) {
   }
   user.taskIds.push(taskId);
   console.log(`[incrementUserTaskCountAsync] ${key}: taskCount now ${user.taskCount}, saving to DB...`);
-  // Wait for the save to complete
-  await saveUserToDB(email);
+   await saveUserToDB(email);
   console.log(`[incrementUserTaskCountAsync] ✓ Saved ${key} with taskCount=${user.taskCount}`);
   return user.taskCount;
 }
@@ -547,8 +523,7 @@ function markUserPro(email, proPin) {
     user.proActivatedAt = new Date(now).toISOString();
     user.proExpiresAt = new Date(now + PRO_DURATION_MS).toISOString();
   }
-  // Save to DB asynchronously (fire and forget)
-  saveUserToDB(email).catch(err => console.error("[markUserPro] Error saving to DB:", err.message));
+   saveUserToDB(email).catch(err => console.error("[markUserPro] Error saving to DB:", err.message));
   return true;
 }
 
@@ -582,13 +557,12 @@ async function broadcastUsers(workspaceName) {
       continue;
     }
 
-    // Prefer the entry with a real email
     if (!existing.email && filledEmail) {
       uniqueMap.set(key, { name: u.name, email: filledEmail, role: u.role });
     }
   }
 
-  // Remove duplicates where same name appears with and without email
+
   for (const [key, val] of uniqueMap.entries()) {
     if (!val.email && val.name) {
       const emailFromMember = memberEmailByName.get(val.name);
@@ -644,11 +618,11 @@ function pushHistory(ws, entry) {
   ws.history.unshift(entry);
 }
 
-// ── SOCKET EVENTS ─────────────────────────────────────────────────────────────
+
 io.on("connection", (socket) => {
   console.log(`[connect] ${socket.id}`);
 
-  // ── AUTH: REGISTER / LOGIN ────────────────────────────────────────────────
+
   socket.on("auth_user", async ({ email, password, name }) => {
     if (!email || !password) {
       return socket.emit("auth_error", "Email and password are required.");
@@ -657,7 +631,7 @@ io.on("connection", (socket) => {
     console.log(`[auth_user] Auth attempt for ${key}`);
     let existing = users[key];
 
-    // If user not in memory, try to load from DB
+
     if (!existing) {
       console.log(`[auth_user] User not in memory, loading from MongoDB...`);
       const dbUser = await loadUserFromDB(email);
@@ -689,14 +663,12 @@ io.on("connection", (socket) => {
         return socket.emit("auth_error", "Authentication failed.");
       }
       existing = result.user;
-      // Update name if a new name is provided
-      if (name && name.trim() && name.trim() !== existing.name) {
+       if (name && name.trim() && name.trim() !== existing.name) {
         console.log(`[auth_user] Updating name for ${key}: "${existing.name}" → "${name.trim()}"`);
         existing.name = name.trim();
         await saveUserToDB(email);
       }
-      // Check if reset date has passed
-      if (existing.resetAt && new Date() > new Date(existing.resetAt)) {
+       if (existing.resetAt && new Date() > new Date(existing.resetAt)) {
         existing.taskCount = 0;
         existing.resetAt = null;
         existing.taskIds = [];
@@ -715,8 +687,7 @@ io.on("connection", (socket) => {
         proExpiresAt: existing.proExpiresAt || null,
       });
     } else {
-      // Register
-      if (!name || !name.trim()) {
+       if (!name || !name.trim()) {
         return socket.emit("auth_error", "Name is required for new accounts.");
       }
       devLog(`[auth_user] Creating new user ${key}`);
@@ -732,7 +703,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ── PRO STATUS CHECK ──────────────────────────────────────────────────────
   socket.on("check_pro_status", ({ email, proPin }) => {
     const key  = email?.toLowerCase().trim();
     const user = users[key];
@@ -801,13 +771,11 @@ io.on("connection", (socket) => {
     }
   });
 
-  // ── JOIN / CREATE WORKSPACE ───────────────────────────────────────────────
+
   socket.on("join_workspace", async (data) => {
     devLog(`[join_workspace] ${data?.workspaceName} | creating=${!!data?.isCreating}`);
     const { workspaceName, password, projectName, userName, isCreating } = data;
-    
-    // Robust email extraction: check multiple possible fields
-    const rawEmail = data.userEmail || data.email || (data.user && data.user.email) || "";
+     const rawEmail = data.userEmail || data.email || (data.user && data.user.email) || "";
     const email = rawEmail.trim().toLowerCase();
     devLog(`[join_workspace] ${userName} @ ${workspaceName}`);
     if (!workspaceName || !password || !userName || !email) {
@@ -817,7 +785,7 @@ io.on("connection", (socket) => {
 
     let existingWs = workspaces[workspaceName];
 
-    // If workspace not in memory, try loading from MongoDB
+
     if (!existingWs && !isCreating) {
       console.log(`[join_workspace] Workspace not in memory, attempting to load from MongoDB...`);
       const loadedWs = await loadRoomFromDB(workspaceName);
@@ -872,7 +840,7 @@ io.on("connection", (socket) => {
     console.log(`  isCreating flag:         ${isCreating}`);
     console.log(`  Creator email exists:    ${!!storedCreatorEmail}`);
     
-    // Determine role: creator (admin) or regular member
+
     let role = "member";
     if (isCreating) {
       role = "admin";
@@ -890,15 +858,13 @@ io.on("connection", (socket) => {
     ws.sockets.set(socket.id, { name: userName, role, email });
     socket.join(workspaceName);
     console.log(`[join_workspace] Added ${userName} to workspace. Total sockets in workspace: ${ws.sockets.size}`);
-
-    // Find existing member by email (to handle name changes)
-    const memberKey = email.toLowerCase().trim();
+     const memberKey = email.toLowerCase().trim();
     const existingMemberIndex = ws.members.findIndex(
       m => m.email && m.email.toLowerCase().trim() === memberKey
     );
     
     if (existingMemberIndex !== -1) {
-      // Update existing member with new name and/or role
+
       const existingMember = ws.members[existingMemberIndex];
       if (existingMember.name !== userName) {
         console.log(`[join_workspace] Updated member name: "${existingMember.name}" → "${userName}"`);
@@ -908,7 +874,7 @@ io.on("connection", (socket) => {
         existingMember.role = "admin";
       }
     } else {
-      // Add new member
+     
       ws.members.push({ name: userName, role, email: memberKey, joinedAt: new Date().toISOString() });
     }
 
@@ -920,10 +886,8 @@ io.on("connection", (socket) => {
       timestamp: new Date().toISOString(),
     });
 
-    // Save to MongoDB after adding member
     await saveRoomToDB(workspaceName);
 
-    // Get user task data from server-side store
     const userRec = await ensureUserLoaded(email);
     ensureProValidity(email);
     const refreshedUser = users[email.toLowerCase().trim()];
@@ -948,15 +912,12 @@ io.on("connection", (socket) => {
     console.log(`[join] ${userName} (${email}) → ${workspaceName} (${role})`);
   });
 
-  // ── REJOIN WORKSPACE (for page refresh recovery) ─────────────────────────
   socket.on("rejoin_workspace", async (data) => {
     console.log(`\n[rejoin_workspace] ════════════════════════════════════════════`);
     console.log(`DEBUG: Full payload received:`, JSON.stringify(data, null, 2));
     
     const { workspaceName, userName } = data;
-    
-    // Robust email extraction: check multiple possible fields
-    const rawEmail = data.userEmail || data.email || (data.user && data.user.email) || "";
+     const rawEmail = data.userEmail || data.email || (data.user && data.user.email) || "";
     const email = rawEmail.trim().toLowerCase();
     console.log(`DEBUG: Extracted email from payload - Raw: "${rawEmail}" | Normalized: "${email}"`);
     
@@ -969,9 +930,7 @@ io.on("connection", (socket) => {
 
     let ws = workspaces[workspaceName];
     console.log(`[rejoin_workspace] Workspace found in memory: ${!!ws}`);
-    
-    // If workspace not in memory, try loading from MongoDB
-    if (!ws) {
+     if (!ws) {
       console.log(`[rejoin_workspace] Workspace not in memory, attempting to load from MongoDB...`);
       const loadedWs = await loadRoomFromDB(workspaceName);
       if (loadedWs) {
@@ -985,9 +944,7 @@ io.on("connection", (socket) => {
       console.error(`[rejoin_workspace] Workspace "${workspaceName}" not found!`);
       return socket.emit("error_msg", `Workspace "${workspaceName}" not found.`);
     }
-
-    // Determine role based on creatorEmail: if user is the creator, they get admin
-    const normalizedUserEmail = email.trim().toLowerCase();
+     const normalizedUserEmail = email.trim().toLowerCase();
     const storedCreatorEmail = (ws.creatorEmail || "").trim().toLowerCase();
     
     console.log(`DEBUG: Role Assignment Check`);
@@ -1005,26 +962,19 @@ io.on("connection", (socket) => {
         console.warn(`⚠️  CRITICAL: storedCreatorEmail is EMPTY! Admin role cannot be restored on rejoin.`);
       }
     }
-    
-    // Add socket to workspace (no PIN required for rejoin)
-    ws.sockets.set(socket.id, { name: userName, role, email });
+     ws.sockets.set(socket.id, { name: userName, role, email });
     socket.join(workspaceName);
     console.log(`[rejoin_workspace] Rejoined ${userName} to workspace. Total sockets: ${ws.sockets.size}`);
-
-    // Update member name if it changed
-    const memberKey = email.toLowerCase().trim();
+     const memberKey = email.toLowerCase().trim();
     const existingMember = ws.members.find(
       m => m.email && m.email.toLowerCase().trim() === memberKey
     );
     if (existingMember && existingMember.name !== userName) {
       console.log(`[rejoin_workspace] Updated member name: "${existingMember.name}" → "${userName}"`);
       existingMember.name = userName;
-      // Save updated member to MongoDB
-      await saveRoomToDB(workspaceName);
+       await saveRoomToDB(workspaceName);
     }
-
-    // Get user task data
-    const userRec = await ensureUserLoaded(email);
+     const userRec = await ensureUserLoaded(email);
     ensureProValidity(email);
     const refreshedUser = users[email.toLowerCase().trim()];
     const { count, resetAt } = getUserTaskData(email);
@@ -1047,9 +997,7 @@ io.on("connection", (socket) => {
     broadcastMembers(workspaceName);
     socket.to(workspaceName).emit("history_update", ws.history);
   });
-
-  // ── UPDATE TASKS ──────────────────────────────────────────────────────────
-  socket.on("update_tasks", async ({ workspaceName, updatedTasks, actionMeta, newTaskId }) => {
+   socket.on("update_tasks", async ({ workspaceName, updatedTasks, actionMeta, newTaskId }) => {
     const ws = workspaces[workspaceName];
     if (!ws) return;
 
@@ -1058,9 +1006,7 @@ io.on("connection", (socket) => {
     if (user.role !== "member" && user.role !== "admin") {
       return socket.emit("permission_denied", "Viewers cannot modify tasks.");
     }
-
-    // ── SERVER-SIDE PRO VALIDATION — enforce limits only for new tasks ──
-    const userRec = await ensureUserLoaded(user.email);
+     const userRec = await ensureUserLoaded(user.email);
     const isNewTask = !!(newTaskId && user.email);
     if (isNewTask) {
       const userRec = await ensureUserLoaded(user.email);
@@ -1079,9 +1025,7 @@ io.on("connection", (socket) => {
     }
 
     ws.tasks = updatedTasks || [];
-
-    // If this is a new task being added, increment user's count server-side and WAIT for DB save
-    if (isNewTask) {
+     if (isNewTask) {
       const newCount = await incrementUserTaskCountAsync(user.email, newTaskId);
       const { resetAt } = getUserTaskData(user.email);
       console.log(`[update_tasks] Emitting task_count_update: taskCount=${newCount}`);
@@ -1097,9 +1041,7 @@ io.on("connection", (socket) => {
         timestamp: new Date().toISOString(),
       });
     }
-
-    // Save to MongoDB
-    await saveRoomToDB(workspaceName);
+     await saveRoomToDB(workspaceName);
 
     socket.to(workspaceName).emit("receive_update", {
       tasks:   ws.tasks,
@@ -1108,16 +1050,11 @@ io.on("connection", (socket) => {
 
     socket.emit("history_update", ws.history);
   });
-
-  // ── CHECK TASK LIMIT ──────────────────────────────────────────────────────
-  // ── CHECK TASK LIMIT ──────────────────────────────────────────────────────
-  socket.on("check_task_limit", async ({ email }) => {
+   socket.on("check_task_limit", async ({ email }) => {
     if (!email) return;
     const key = email.toLowerCase().trim();
     let ws_user = users[key];
-    
-    // If user not in memory, try loading from DB
-    if (!ws_user) {
+     if (!ws_user) {
       console.log(`[check_task_limit] User ${key} not in memory, attempting to load...`);
       const dbUser = await loadUserFromDB(email);
       if (dbUser) {
@@ -1146,9 +1083,7 @@ io.on("connection", (socket) => {
       canAdd: count < limit,
     });
   });
-
-  // ── TYPING INDICATORS ─────────────────────────────────────────────────────
-  socket.on("typing_start", ({ workspaceName, context }) => {
+   socket.on("typing_start", ({ workspaceName, context }) => {
     const ws = workspaces[workspaceName];
     if (!ws) return;
     const user = ws.sockets.get(socket.id);
@@ -1163,9 +1098,7 @@ io.on("connection", (socket) => {
     if (!user) return;
     socket.to(workspaceName).emit("typing_clear", { name: user.name });
   });
-
-  // ── DISCONNECT ────────────────────────────────────────────────────────────
-  socket.on("disconnect", () => {
+   socket.on("disconnect", () => {
     console.log(`[disconnect] ${socket.id}`);
     for (const [wsName, ws] of Object.entries(workspaces)) {
       if (ws.sockets.has(socket.id)) {
@@ -1191,9 +1124,7 @@ io.on("connection", (socket) => {
       }
     }
   });
-
-  // ── DELETE WORKSPACE (ADMIN ONLY) ──────────────────────────────────────────
-  socket.on("delete_workspace", async ({ workspaceName, email }) => {
+   socket.on("delete_workspace", async ({ workspaceName, email }) => {
     console.log(`[delete_workspace] User: ${email} | Workspace: ${workspaceName}`);
     
     const ws = workspaces[workspaceName];
@@ -1205,13 +1136,9 @@ io.on("connection", (socket) => {
     if (!user || user.role !== "admin") {
       return socket.emit("error_msg", "Only admins can delete workspaces.");
     }
-
-    // Delete from memory
-    delete workspaces[workspaceName];
+     delete workspaces[workspaceName];
     console.log(`[delete_workspace] ✓ Deleted ${workspaceName} from memory`);
-
-    // Delete from MongoDB
-    if (mongoConnected) {
+     if (mongoConnected) {
       try {
         const collection = mongoose.connection.db.collection("workspaces");
         await collection.deleteOne({ workspaceName });
@@ -1220,16 +1147,12 @@ io.on("connection", (socket) => {
         console.error(`[delete_workspace] Error deleting from DB:`, err.message);
       }
     }
-
-    // Notify all members
-    io.to(workspaceName).emit("error_msg", `Workspace "${workspaceName}" has been deleted by admin.`);
+     io.to(workspaceName).emit("error_msg", `Workspace "${workspaceName}" has been deleted by admin.`);
     socket.leave(workspaceName);
     
     socket.emit("workspace_deleted_success");
   });
-
-  // ── CLEAR HISTORY (ADMIN ONLY) ─────────────────────────────────────────────
-  socket.on("clear_history", async ({ workspaceName }) => {
+   socket.on("clear_history", async ({ workspaceName }) => {
     const ws = workspaces[workspaceName];
     if (!ws) return;
     const user = ws.sockets.get(socket.id);
@@ -1243,13 +1166,10 @@ io.on("connection", (socket) => {
     socket.emit("history_cleared");
   });
 });
-
-// ── START ─────────────────────────────────────────────────────────────────────
-const PORT = process.env.PORT || 3001;
+ const PORT = process.env.PORT || 3001;
 
 async function startServer() {
-  // Wait for MongoDB connection before starting socket listeners
-  await connectDB();
+   await connectDB();
   
   server.listen(PORT, () => {
     console.log(`[Server] ✓ SyncBoard listening on :${PORT}`);
