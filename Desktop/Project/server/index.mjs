@@ -36,12 +36,21 @@ const mailTransporter = SMTP_USER && SMTP_PASS
       port: 587,
       secure: false,
       requireTLS: true,
+      connectionTimeout: 8000,
+      greetingTimeout: 8000,
+      socketTimeout: 10000,
       auth: {
         user: SMTP_USER,
         pass: SMTP_PASS,
       },
     })
   : null;
+
+if (mailTransporter) {
+  mailTransporter.verify()
+    .then(() => devLog("[startup] SMTP transporter verified"))
+    .catch((err) => console.error("[startup] SMTP transporter verification failed:", err.message));
+}
 
 const app    = express();
 const server = http.createServer(app);
@@ -73,6 +82,16 @@ app.use(rateLimit({
  app.get("/", (_, res) => res.send("SyncBoard Pro server running ✓"));
  const CONTACT_MESSAGE_LIMIT = 500;
 const contactMessages = [];
+
+const sendMailWithTimeout = async (mailOptions, timeoutMs = 12000) => {
+  if (!mailTransporter) throw new Error("Email delivery not configured.");
+  return Promise.race([
+    mailTransporter.sendMail(mailOptions),
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error("Email delivery timed out.")), timeoutMs);
+    }),
+  ]);
+};
 
 app.post("/api/contact", async (req, res) => {
   const body = req.body || {};
@@ -145,7 +164,7 @@ app.post("/api/contact", async (req, res) => {
   ].filter(Boolean).join("\n");
 
   try {
-    await mailTransporter.sendMail({
+    await sendMailWithTimeout({
       from: `SyncBoard Contact <${SMTP_USER}>`,
       to: CONTACT_EMAIL_TO,
       replyTo: entry.email,
