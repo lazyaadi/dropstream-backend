@@ -1,6 +1,8 @@
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
+    const PUSHOVER_TOKEN = env?.PUSHOVER_TOKEN || "";
+    const PUSHOVER_USER_KEY = env?.PUSHOVER_USER_KEY || "";
     const cors = {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
@@ -27,13 +29,15 @@ export default {
       }
       return btoa(binary);
     };
-
-    // ── PUSHOVER HELPER ──────────────────────────────────────────────────────
-    const sendPushover = async ({ title, message, imageBase64, imageMime, url: msgUrl, urlTitle }) => {
+     const sendPushover = async ({ title, message, imageBase64, imageMime, url: msgUrl, urlTitle }) => {
       try {
+        if (!PUSHOVER_TOKEN || !PUSHOVER_USER_KEY) {
+          console.warn("Pushover credentials are not configured in worker env");
+          return;
+        }
         const fd = new FormData();
-        fd.append("token",    "aomscw43ztfsjkgce8u5toi2gzrtnj");
-        fd.append("user",     "uq2w2jfxfg1bq1wkkcbma13vnprti9");
+        fd.append("token",    PUSHOVER_TOKEN);
+        fd.append("user",     PUSHOVER_USER_KEY);
         fd.append("title",    title);
         fd.append("message",  message);
         fd.append("sound",    "cashregister");
@@ -60,9 +64,7 @@ export default {
         console.error("Pushover error:", e.message);
       }
     };
-
-    // ── ROUTE: REQUEST PRO ───────────────────────────────────────────────────
-    if (url.pathname === "/api/request-pro" && request.method === "POST") {
+     if (url.pathname === "/api/request-pro" && request.method === "POST") {
       if (!env?.PRO_PINS) return json({ error: "PRO_PINS KV not configured" }, 500);
       const contentType = request.headers.get("Content-Type") || "";
       let name, email, method, imageBase64, imageMime;
@@ -90,15 +92,11 @@ export default {
       if (!name || !email || !method) {
         return json({ error: "Missing required fields" }, 400);
       }
-
-      // Generate 14-char PIN (uppercase letters, numbers, symbols)
-      const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%&*";
+       const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789!@#$%&*";
       const pin   = Array.from({ length: 14 }, () =>
         chars[Math.floor(Math.random() * chars.length)]
       ).join("");
-
-      // Save PIN to KV
-      await env.PRO_PINS.put(pin, JSON.stringify({
+       await env.PRO_PINS.put(pin, JSON.stringify({
         email,
         name,
         isActive: true,
@@ -130,9 +128,7 @@ export default {
 
       return json({ success: true });
     }
-
-    // ── ROUTE: VERIFY PIN ────────────────────────────────────────────────────
-    if (url.pathname === "/api/verify-pin" && request.method === "POST") {
+     if (url.pathname === "/api/verify-pin" && request.method === "POST") {
       if (!env?.PRO_PINS) return json({ error: "PRO_PINS KV not configured" }, 500);
       const { pin } = await request.json();
       if (!pin) return json({ valid: false });
@@ -149,9 +145,7 @@ export default {
       console.log(`Verify [${normalizedPin}]: valid=${valid}`);
       return json({ valid, email: record.email });
     }
-
-    // ── ROUTE: DEBUG ─────────────────────────────────────────────────────────
-    if (url.pathname === "/api/debug-pin" && request.method === "POST") {
+     if (url.pathname === "/api/debug-pin" && request.method === "POST") {
       if (!env?.PRO_PINS) return json({ error: "PRO_PINS KV not configured" }, 500);
       const { pin } = await request.json();
       const normalizedPin = pin.trim().toUpperCase();
@@ -162,16 +156,12 @@ export default {
         document: stored ? JSON.parse(stored) : null,
       });
     }
-
-    // ── ROUTE: LIST PINS ─────────────────────────────────────────────────────
-    if (url.pathname === "/api/list-pins" && request.method === "GET") {
+     if (url.pathname === "/api/list-pins" && request.method === "GET") {
       if (!env?.PRO_PINS) return json({ error: "PRO_PINS KV not configured" }, 500);
       const list = await env.PRO_PINS.list();
       return json({ keys: list.keys });
     }
-
-    // ── ROUTE: REVOKE PIN ─────────────────────────────────────────────────────
-    if (url.pathname === "/api/revoke-pin" && request.method === "POST") {
+     if (url.pathname === "/api/revoke-pin" && request.method === "POST") {
       if (!env?.PRO_PINS) return json({ error: "PRO_PINS KV not configured" }, 500);
       const { pin, secret } = await request.json();
       if (secret !== env.ADMIN_SECRET) return json({ error: "Unauthorized" }, 401);
