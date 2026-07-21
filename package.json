@@ -1,17 +1,19 @@
 {
-  "name": "webrtc",
+  "name": "server",
   "version": "1.0.0",
-  "description": "",
-  "main": "RTC.js",
+  "main": "index.mjs",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "start": "node index.mjs",
+    "clear": "node clear.mjs"
   },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
   "dependencies": {
-    "express": "^5.2.1",
+    "bcryptjs": "^3.0.3",
+    "cors": "^2.8.6",
+    "dotenv": "^16.6.1",
+    "express": "^4.22.1",
+    "express-rate-limit": "^8.5.2",
+    "mongoose": "^9.5.0",
+    "nodemailer": "^6.9.14",
     "socket.io": "^4.8.3"
   }
 }
