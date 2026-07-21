@@ -27,12 +27,15 @@ const IS_DEV = process.env.NODE_ENV !== "production";
 const ALLOWED_ORIGINS = parseAllowedOrigins();
 const devLog = (...args) => { if (IS_DEV) console.log(...args); };
 const SMTP_USER = process.env.SMTP_USER || "";
-const SMTP_PASS = process.env.SMTP_PASS || "";
+const SMTP_PASS = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
 const CONTACT_EMAIL_TO = process.env.CONTACT_EMAIL_TO || SMTP_USER || "";
 
 const mailTransporter = SMTP_USER && SMTP_PASS
   ? nodemailer.createTransport({
-      service: "gmail",
+      host: "smtp.gmail.com",
+      port: 587,
+      secure: false,
+      requireTLS: true,
       auth: {
         user: SMTP_USER,
         pass: SMTP_PASS,
