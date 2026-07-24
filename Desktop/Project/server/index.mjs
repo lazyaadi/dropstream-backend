@@ -105,6 +105,26 @@ app.use(cors({
   origin: (origin, cb) => cb(null, isOriginAllowed(origin, ALLOWED_ORIGINS)),
   credentials: true,
 }));
+app.use((req, res, next) => {
+  if (req.path === "/api/contact") {
+    const startedAt = Date.now();
+    console.log("[contact] request entered middleware:", {
+      method: req.method,
+      origin: req.headers.origin || "",
+      contentType: req.headers["content-type"] || "",
+      contentLength: req.headers["content-length"] || "",
+      ip: (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "",
+    });
+    res.on("finish", () => {
+      console.log("[contact] response finished:", {
+        method: req.method,
+        statusCode: res.statusCode,
+        durationMs: Date.now() - startedAt,
+      });
+    });
+  }
+  next();
+});
 app.use(express.json({ limit: "2mb" }));
 app.use(rateLimit({
   windowMs: 15 * 60 * 1000,
