@@ -5,7 +5,6 @@ import { Server } from "socket.io";
 import cors     from "cors";
 import dotenv   from "dotenv";
 import mongoose from "mongoose";
-import nodemailer from "nodemailer";
 import rateLimit from "express-rate-limit";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
@@ -13,8 +12,6 @@ import {
   hashSecret,
   verifyUserPassword,
   verifyWorkspacePin,
-  maybeUpgradeWorkspacePin,
-  verifyProPinWithWorker,
   parseAllowedOrigins,
   isOriginAllowed,
 } from "./security.mjs";
@@ -26,45 +23,12 @@ dotenv.config({ path: join(__dirname, ".env") });
 const IS_DEV = process.env.NODE_ENV !== "production";
 const ALLOWED_ORIGINS = parseAllowedOrigins();
 const devLog = (...args) => { if (IS_DEV) console.log(...args); };
-const SMTP_USER = process.env.SMTP_USER || "";
-const SMTP_PASS = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
-const CONTACT_EMAIL_TO = process.env.CONTACT_EMAIL_TO || SMTP_USER || "";
-const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
-const RESEND_DEFAULT_FROM_EMAIL = "onboarding@resend.dev";
-const normalizeResendFromEmail = (value) => {
-  const text = String(value || "").trim();
-  if (!text) return `SyncBoard <${RESEND_DEFAULT_FROM_EMAIL}>`;
-
-  const angleMatch = text.match(/<([^>]+)>/);
-  const extractedEmail = angleMatch?.[1]?.trim();
-  if (extractedEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(extractedEmail)) {
-    const displayName = text.slice(0, angleMatch.index).trim().replace(/\s+$/, "");
-    return displayName ? `${displayName} <${extractedEmail}>` : extractedEmail;
-  }
-
-  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)) {
-    return text;
-  }
-
-  return `SyncBoard <${RESEND_DEFAULT_FROM_EMAIL}>`;
-};
-const RESEND_FROM_EMAIL = normalizeResendFromEmail(process.env.RESEND_FROM_EMAIL || "SyncBoard <onboarding@resend.dev>");
-const CONTACT_EMAIL_PROVIDER = (process.env.CONTACT_EMAIL_PROVIDER || (RESEND_API_KEY ? "resend" : "smtp")).toLowerCase();
-
-const maskEmail = (value) => {
-  const text = String(value || "").trim();
-  if (!text) return "";
-  const [local, domain] = text.split("@");
-  if (!domain) return text;
-  const head = local.slice(0, 2);
-  return `${head}${local.length > 2 ? "***" : ""}@${domain}`;
-};
-
-const logMailError = (err, context = {}) => {
+const PUSHOVER_TOKEN = process.env.PUSHOVER_TOKEN || "";
+const PUSHOVER_USER_KEY = process.env.PUSHOVER_USER_KEY || "";
+const logNotificationError = (err, context = {}) => {
   const details = {
     message: err?.message,
     code: err?.code,
-    command: err?.command,
     response: err?.response,
     responseCode: err?.responseCode,
     errno: err?.errno,
@@ -74,186 +38,53 @@ const logMailError = (err, context = {}) => {
     host: err?.host,
     context,
   };
-  console.error("[contact] SMTP error:", JSON.stringify(details, null, 2));
-  if (err?.stack) console.error("[contact] SMTP stack:\n" + err.stack);
+  console.error("[contact] notification error:", JSON.stringify(details, null, 2));
+  if (err?.stack) console.error("[contact] notification stack:\n" + err.stack);
 };
 
-const mailTransporter = SMTP_USER && SMTP_PASS
-  ? nodemailer.createTransport({
-      host: "smtp.gmail.com",
-      port: 465,
-      secure: true,
-      connectionTimeout: 10000,
-      greetingTimeout: 10000,
-      socketTimeout: 15000,
-      auth: {
-        user: SMTP_USER,
-        pass: SMTP_PASS,
-      },
-    })
-  : null;
+const sendViaPushover = async (payload) => {
+  if (!PUSHOVER_TOKEN || !PUSHOVER_USER_KEY) {
+    throw new Error("Pushover delivery not configured.");
+  }
 
-if (mailTransporter) {
-  console.log("[startup] SMTP transporter configured:", {
-    user: maskEmail(SMTP_USER),
-    to: maskEmail(CONTACT_EMAIL_TO),
-    host: "smtp.gmail.com",
-    port: 465,
-    secure: true,
-  });
-  mailTransporter.verify()
-    .then(() => devLog("[startup] SMTP transporter verified"))
-    .catch((err) => console.error("[startup] SMTP transporter verification failed:", err.message));
-}
-
-const sendViaResendWithTimeout = async (mailOptions, timeoutMs = 12000) => {
-  if (!RESEND_API_KEY) throw new Error("Resend email delivery not configured.");
   const startedAt = Date.now();
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort("resend timeout"), timeoutMs);
+  const body = new URLSearchParams();
+  body.set("token", PUSHOVER_TOKEN);
+  body.set("user", PUSHOVER_USER_KEY);
+  body.set("title", payload.title);
+  body.set("message", payload.message);
+  body.set("priority", "0");
+  body.set("html", "1");
 
-  console.log("[contact] sending email via resend:", {
-    from: RESEND_FROM_EMAIL,
-    to: maskEmail(mailOptions.to),
-    replyTo: maskEmail(mailOptions.replyTo),
-    subject: mailOptions.subject,
-    timeoutMs,
+  console.log("[contact] sending notification via pushover:", {
+    title: payload.title,
+    messageLength: payload.message.length,
   });
 
   try {
-    const response = await fetch("https://api.resend.com/emails", {
+    const response = await fetch("https://api.pushover.net/1/messages.json", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${RESEND_API_KEY}`,
-        "Content-Type": "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
       },
-      body: JSON.stringify({
-        from: RESEND_FROM_EMAIL,
-        to: [mailOptions.to],
-        subject: mailOptions.subject,
-        text: mailOptions.text,
-        reply_to: mailOptions.replyTo,
-      }),
-      signal: controller.signal,
+      body: body.toString(),
     });
 
     const responseText = await response.text();
     if (!response.ok) {
-      throw new Error(`Resend HTTP ${response.status}: ${responseText.slice(0, 500)}`);
+      throw new Error(`Pushover HTTP ${response.status}: ${responseText.slice(0, 500)}`);
     }
 
-    console.log("[contact] resend email sent:", {
+    console.log("[contact] pushover notification sent:", {
       durationMs: Date.now() - startedAt,
       responsePreview: responseText.slice(0, 500),
     });
+
     return responseText;
   } catch (err) {
-    logMailError(err, { stage: "resend-send", durationMs: Date.now() - startedAt });
+    logNotificationError(err, { stage: "pushover-send", durationMs: Date.now() - startedAt });
     throw err;
-  } finally {
-    clearTimeout(timeout);
   }
-};
-
-const app    = express();
-const server = http.createServer(app);
-const io     = new Server(server, {
-  cors: {
-    origin: (origin, cb) => {
-      cb(null, isOriginAllowed(origin, ALLOWED_ORIGINS));
-    },
-    methods: ["GET", "POST"],
-    credentials: true,
-  },
-  maxHttpBufferSize: 10 * 1024 * 1024,
-  pingInterval: 25000,
-  pingTimeout: 60000,
-  transports: ["websocket", "polling"],
-});
-
-app.use(cors({
-  origin: (origin, cb) => cb(null, isOriginAllowed(origin, ALLOWED_ORIGINS)),
-  credentials: true,
-}));
-app.use((req, res, next) => {
-  if (req.path === "/api/contact") {
-    const startedAt = Date.now();
-    const requestId = req.headers["x-contact-request-id"] || "";
-    console.log("[contact] request entered middleware:", {
-      requestId,
-      method: req.method,
-      origin: req.headers.origin || "",
-      contentType: req.headers["content-type"] || "",
-      contentLength: req.headers["content-length"] || "",
-      ip: (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "",
-    });
-    res.on("finish", () => {
-      console.log("[contact] response finished:", {
-        method: req.method,
-        statusCode: res.statusCode,
-        durationMs: Date.now() - startedAt,
-      });
-    });
-  }
-  next();
-});
-app.use(express.json({ limit: "2mb" }));
-app.use(rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: IS_DEV ? 1000 : 300,
-  standardHeaders: true,
-  legacyHeaders: false,
-}));
- app.get("/", (_, res) => res.send("SyncBoard Pro server running ✓"));
- const CONTACT_MESSAGE_LIMIT = 500;
-const contactMessages = [];
-
-const sendMailWithTimeout = async (mailOptions, timeoutMs = 12000) => {
-  if (!mailTransporter) throw new Error("Email delivery not configured.");
-  const startedAt = Date.now();
-  console.log("[contact] sending email:", {
-    to: maskEmail(mailOptions.to),
-    replyTo: maskEmail(mailOptions.replyTo),
-    subject: mailOptions.subject,
-    timeoutMs,
-  });
-  return Promise.race([
-    mailTransporter.sendMail(mailOptions).then((info) => {
-      console.log("[contact] email sent:", {
-        messageId: info?.messageId,
-        accepted: info?.accepted,
-        rejected: info?.rejected,
-        durationMs: Date.now() - startedAt,
-      });
-      return info;
-    }).catch((err) => {
-      logMailError(err, { stage: "sendMail", durationMs: Date.now() - startedAt });
-      throw err;
-    }),
-    new Promise((_, reject) => {
-      setTimeout(() => {
-        console.error("[contact] email send timeout:", {
-          timeoutMs,
-          durationMs: Date.now() - startedAt,
-          to: maskEmail(mailOptions.to),
-        });
-        reject(new Error("Email delivery timed out."));
-      }, timeoutMs);
-    }),
-  ]);
-};
-
-const sendContactEmail = async (mailOptions) => {
-  if (CONTACT_EMAIL_PROVIDER === "resend") {
-    return sendViaResendWithTimeout(mailOptions);
-  }
-  if (CONTACT_EMAIL_PROVIDER === "smtp") {
-    return sendMailWithTimeout(mailOptions);
-  }
-  if (RESEND_API_KEY) {
-    return sendViaResendWithTimeout(mailOptions);
-  }
-  return sendMailWithTimeout(mailOptions);
 };
 
 app.post("/api/contact", async (req, res) => {
@@ -271,9 +102,9 @@ app.post("/api/contact", async (req, res) => {
 
   console.log("[contact] request received:", {
     requestId,
-    provider: CONTACT_EMAIL_PROVIDER,
+    provider: "pushover",
     name: name || userName || "Anonymous",
-    email: maskEmail(email),
+    email,
     subject,
     workspaceName,
     role,
@@ -322,38 +153,32 @@ app.post("/api/contact", async (req, res) => {
     return res.status(500).json({ error: "Failed to store message." });
   }
 
-  if (!mailTransporter || !CONTACT_EMAIL_TO) {
-    if (!(RESEND_API_KEY && CONTACT_EMAIL_PROVIDER === "resend")) {
-      return res.status(503).json({ error: "Email delivery not configured." });
-    }
-  }
-
-  const mailSubject = `SyncBoard Support${workspaceName ? ` • ${workspaceName}` : ""}${subject ? ` • ${subject}` : ""}`;
-  const text = [
-    `Name: ${entry.name}`,
-    `Email: ${entry.email}`,
-    entry.subject ? `Subject: ${entry.subject}` : "",
-    entry.userName ? `User Name: ${entry.userName}` : "",
-    entry.userEmail ? `User Email: ${entry.userEmail}` : "",
-    entry.role ? `Role: ${entry.role}` : "",
-    entry.workspaceName ? `Workspace: ${entry.workspaceName}` : "",
-    `IP: ${entry.ip}`,
-    "",
-    entry.message,
-  ].filter(Boolean).join("\n");
-
   try {
-    await sendContactEmail({
-      from: `SyncBoard Contact <${SMTP_USER}>`,
-      to: CONTACT_EMAIL_TO,
-      replyTo: entry.email,
-      subject: mailSubject,
-      text,
+    if (!PUSHOVER_TOKEN || !PUSHOVER_USER_KEY) {
+      return res.status(503).json({ error: "Pushover delivery not configured." });
+    }
+
+    const messageLines = [
+      `<b>Name:</b> ${entry.name}`,
+      `<b>Email:</b> ${entry.email}`,
+      entry.subject ? `<b>Subject:</b> ${entry.subject}` : "",
+      entry.userName ? `<b>User Name:</b> ${entry.userName}` : "",
+      entry.userEmail ? `<b>User Email:</b> ${entry.userEmail}` : "",
+      entry.role ? `<b>Role:</b> ${entry.role}` : "",
+      entry.workspaceName ? `<b>Workspace:</b> ${entry.workspaceName}` : "",
+      `<b>IP:</b> ${entry.ip}`,
+      "",
+      entry.message,
+    ].filter(Boolean).join("\n");
+
+    await sendViaPushover({
+      title: `SyncBoard Contact${workspaceName ? ` • ${workspaceName}` : ""}${subject ? ` • ${subject}` : ""}`,
+      message: messageLines,
     });
     return res.json({ ok: true });
   } catch (err) {
-    logMailError(err, { stage: "contact-route", requestId, workspaceName: entry.workspaceName, email: entry.email });
-    return res.status(500).json({ error: "Failed to send email." });
+    logNotificationError(err, { stage: "contact-route", requestId, workspaceName: entry.workspaceName, email: entry.email, provider: "pushover" });
+    return res.status(500).json({ error: "Failed to send notification." });
   }
 });
  const MONGO_URI = process.env.MONGO_URI;
