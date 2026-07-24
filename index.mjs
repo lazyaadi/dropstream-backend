@@ -5,7 +5,6 @@ import { Server } from "socket.io";
 import cors     from "cors";
 import dotenv   from "dotenv";
 import mongoose from "mongoose";
-import nodemailer from "nodemailer";
 import rateLimit from "express-rate-limit";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
@@ -26,19 +25,67 @@ dotenv.config({ path: join(__dirname, ".env") });
 const IS_DEV = process.env.NODE_ENV !== "production";
 const ALLOWED_ORIGINS = parseAllowedOrigins();
 const devLog = (...args) => { if (IS_DEV) console.log(...args); };
-const SMTP_USER = process.env.SMTP_USER || "";
-const SMTP_PASS = process.env.SMTP_PASS || "";
-const CONTACT_EMAIL_TO = process.env.CONTACT_EMAIL_TO || SMTP_USER || "";
+const PUSHOVER_TOKEN = process.env.PUSHOVER_TOKEN || "";
+const PUSHOVER_USER_KEY = process.env.PUSHOVER_USER_KEY || "";
 
-const mailTransporter = SMTP_USER && SMTP_PASS
-  ? nodemailer.createTransport({
-      service: "gmail",
-      auth: {
-        user: SMTP_USER,
-        pass: SMTP_PASS,
+const logNotificationError = (err, context = {}) => {
+  const details = {
+    message: err?.message,
+    code: err?.code,
+    response: err?.response,
+    responseCode: err?.responseCode,
+    errno: err?.errno,
+    syscall: err?.syscall,
+    address: err?.address,
+    port: err?.port,
+    host: err?.host,
+    context,
+  };
+  console.error("[contact] notification error:", JSON.stringify(details, null, 2));
+  if (err?.stack) console.error("[contact] notification stack:\n" + err.stack);
+};
+
+const sendViaPushover = async (payload) => {
+  if (!PUSHOVER_TOKEN || !PUSHOVER_USER_KEY) {
+    throw new Error("Pushover delivery not configured.");
+  }
+
+  const startedAt = Date.now();
+  const timeoutMs = 10000;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error("Pushover request timed out.")), timeoutMs);
+
+  const body = new URLSearchParams();
+  body.set("token", PUSHOVER_TOKEN);
+  body.set("user", PUSHOVER_USER_KEY);
+  body.set("title", payload.title);
+  body.set("message", payload.message);
+  body.set("priority", "0");
+  body.set("html", "1");
+
+  try {
+    const response = await fetch("https://api.pushover.net/1/messages.json", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
       },
-    })
-  : null;
+      body: body.toString(),
+      signal: controller.signal,
+    });
+
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw new Error(`Pushover HTTP ${response.status}: ${responseText.slice(0, 500)}`);
+    }
+
+    return responseText;
+  } catch (err) {
+    logNotificationError(err, { stage: "pushover-send", durationMs: Date.now() - startedAt });
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
 
 const app    = express();
 const server = http.createServer(app);
@@ -73,6 +120,7 @@ const contactMessages = [];
 
 app.post("/api/contact", async (req, res) => {
   const body = req.body || {};
+  const requestId = String(req.headers["x-contact-request-id"] || body.requestId || "").trim();
   const name = String(body.name || "").trim().slice(0, 80);
   const email = String(body.email || "").trim().toLowerCase().slice(0, 120);
   const subject = String(body.subject || "").trim().slice(0, 120);
@@ -113,7 +161,9 @@ app.post("/api/contact", async (req, res) => {
   try {
     if (mongoConnected) {
       const collection = mongoose.connection.db.collection("contact_messages");
-      await collection.insertOne(entry);
+      collection.insertOne(entry).catch((err) => {
+        console.error("[contact] Failed to store message in background:", err.message);
+      });
     } else {
       contactMessages.push(entry);
       if (contactMessages.length > CONTACT_MESSAGE_LIMIT) contactMessages.shift();
@@ -123,36 +173,41 @@ app.post("/api/contact", async (req, res) => {
     return res.status(500).json({ error: "Failed to store message." });
   }
 
-  if (!mailTransporter || !CONTACT_EMAIL_TO) {
-    return res.status(503).json({ error: "Email delivery not configured." });
-  }
-
-  const mailSubject = `SyncBoard Support${workspaceName ? ` • ${workspaceName}` : ""}${subject ? ` • ${subject}` : ""}`;
-  const text = [
-    `Name: ${entry.name}`,
-    `Email: ${entry.email}`,
-    entry.subject ? `Subject: ${entry.subject}` : "",
-    entry.userName ? `User Name: ${entry.userName}` : "",
-    entry.userEmail ? `User Email: ${entry.userEmail}` : "",
-    entry.role ? `Role: ${entry.role}` : "",
-    entry.workspaceName ? `Workspace: ${entry.workspaceName}` : "",
-    `IP: ${entry.ip}`,
-    "",
-    entry.message,
-  ].filter(Boolean).join("\n");
-
   try {
-    await mailTransporter.sendMail({
-      from: `SyncBoard Contact <${SMTP_USER}>`,
-      to: CONTACT_EMAIL_TO,
-      replyTo: entry.email,
-      subject: mailSubject,
-      text,
+    if (!PUSHOVER_TOKEN || !PUSHOVER_USER_KEY) {
+      return res.status(503).json({ error: "Pushover delivery not configured." });
+    }
+
+    const messageLines = [
+      `<b>Name:</b> ${entry.name}`,
+      `<b>Email:</b> ${entry.email}`,
+      entry.subject ? `<b>Subject:</b> ${entry.subject}` : "",
+      entry.userName ? `<b>User Name:</b> ${entry.userName}` : "",
+      entry.userEmail ? `<b>User Email:</b> ${entry.userEmail}` : "",
+      entry.role ? `<b>Role:</b> ${entry.role}` : "",
+      entry.workspaceName ? `<b>Workspace:</b> ${entry.workspaceName}` : "",
+      `<b>IP:</b> ${entry.ip}`,
+      "",
+      entry.message,
+    ].filter(Boolean).join("\n");
+
+    sendViaPushover({
+      title: `SyncBoard Contact${workspaceName ? ` • ${workspaceName}` : ""}${subject ? ` • ${subject}` : ""}`,
+      message: messageLines,
+    }).catch((err) => {
+      logNotificationError(err, {
+        stage: "contact-route-async-send",
+        requestId,
+        workspaceName: entry.workspaceName,
+        email: entry.email,
+        provider: "pushover",
+      });
     });
+
     return res.json({ ok: true });
   } catch (err) {
-    console.error("[contact] Failed to send email:", err.message);
-    return res.status(500).json({ error: "Failed to send email." });
+    logNotificationError(err, { stage: "contact-route", requestId, workspaceName: entry.workspaceName, email: entry.email, provider: "pushover" });
+    return res.status(500).json({ error: "Failed to send notification." });
   }
 });
  const MONGO_URI = process.env.MONGO_URI;
