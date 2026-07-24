@@ -87,6 +87,52 @@ const sendViaPushover = async (payload) => {
   }
 };
 
+const formatContactPushoverMessage = (entry) => {
+  const clean = (value) => String(value || "").trim();
+  const cleanSingleLine = (value) => clean(value).replace(/\s+/g, " ");
+
+  const name = cleanSingleLine(entry.name);
+  const email = cleanSingleLine(entry.email).toLowerCase();
+  const subject = cleanSingleLine(entry.subject);
+  const workspace = cleanSingleLine(entry.workspaceName);
+  const role = cleanSingleLine(entry.role);
+  const ip = cleanSingleLine(entry.ip);
+  const userName = cleanSingleLine(entry.userName);
+  const userEmail = cleanSingleLine(entry.userEmail).toLowerCase();
+
+  const lines = [];
+  lines.push(`<b>Name:</b> ${name || "Anonymous"}`);
+  if (email) lines.push(`<b>Email:</b> ${email}`);
+  if (subject) lines.push(`<b>Subject:</b> ${subject}`);
+  if (workspace) lines.push(`<b>Workspace:</b> ${workspace}`);
+  if (role) lines.push(`<b>Role:</b> ${role}`);
+  if (ip) lines.push(`<b>IP:</b> ${ip}`);
+
+  if (userName && userName.toLowerCase() !== (name || "").toLowerCase()) {
+    lines.push(`<b>User Name:</b> ${userName}`);
+  }
+  if (userEmail && userEmail !== email) {
+    lines.push(`<b>User Email:</b> ${userEmail}`);
+  }
+
+  const rawMessage = clean(entry.message)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n");
+
+  lines.push("");
+  lines.push("<b>Message:</b>");
+  lines.push(rawMessage || "(empty)");
+
+  const maxLen = 1000;
+  let text = lines.join("\n");
+  if (text.length > maxLen) {
+    text = `${text.slice(0, maxLen - 20)}\n... (truncated)`;
+  }
+  return text;
+};
+
 const app    = express();
 const server = http.createServer(app);
 const io     = new Server(server, {
@@ -178,18 +224,7 @@ app.post("/api/contact", async (req, res) => {
       return res.status(503).json({ error: "Pushover delivery not configured." });
     }
 
-    const messageLines = [
-      `<b>Name:</b> ${entry.name}`,
-      `<b>Email:</b> ${entry.email}`,
-      entry.subject ? `<b>Subject:</b> ${entry.subject}` : "",
-      entry.userName ? `<b>User Name:</b> ${entry.userName}` : "",
-      entry.userEmail ? `<b>User Email:</b> ${entry.userEmail}` : "",
-      entry.role ? `<b>Role:</b> ${entry.role}` : "",
-      entry.workspaceName ? `<b>Workspace:</b> ${entry.workspaceName}` : "",
-      `<b>IP:</b> ${entry.ip}`,
-      "",
-      entry.message,
-    ].filter(Boolean).join("\n");
+    const messageLines = formatContactPushoverMessage(entry);
 
     sendViaPushover({
       title: `SyncBoard Contact${workspaceName ? ` • ${workspaceName}` : ""}${subject ? ` • ${subject}` : ""}`,
