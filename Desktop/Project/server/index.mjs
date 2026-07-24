@@ -149,7 +149,9 @@ app.post("/api/contact", async (req, res) => {
   try {
     if (mongoConnected) {
       const collection = mongoose.connection.db.collection("contact_messages");
-      await collection.insertOne(entry);
+      collection.insertOne(entry).catch((err) => {
+        console.error("[contact] Failed to store message in background:", err.message);
+      });
     } else {
       contactMessages.push(entry);
       if (contactMessages.length > CONTACT_MESSAGE_LIMIT) contactMessages.shift();
