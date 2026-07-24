@@ -93,6 +93,52 @@ const sendViaPushover = async (payload) => {
   }
 };
 
+const formatContactPushoverMessage = (entry) => {
+  const clean = (value) => String(value || "").trim();
+  const cleanSingleLine = (value) => clean(value).replace(/\s+/g, " ");
+
+  const name = cleanSingleLine(entry.name);
+  const email = cleanSingleLine(entry.email).toLowerCase();
+  const subject = cleanSingleLine(entry.subject);
+  const workspace = cleanSingleLine(entry.workspaceName);
+  const role = cleanSingleLine(entry.role);
+  const ip = cleanSingleLine(entry.ip);
+  const userName = cleanSingleLine(entry.userName);
+  const userEmail = cleanSingleLine(entry.userEmail).toLowerCase();
+
+  const lines = [];
+  lines.push(`<b>Name:</b> ${name || "Anonymous"}`);
+  if (email) lines.push(`<b>Email:</b> ${email}`);
+  if (subject) lines.push(`<b>Subject:</b> ${subject}`);
+  if (workspace) lines.push(`<b>Workspace:</b> ${workspace}`);
+  if (role) lines.push(`<b>Role:</b> ${role}`);
+  if (ip) lines.push(`<b>IP:</b> ${ip}`);
+
+  if (userName && userName.toLowerCase() !== (name || "").toLowerCase()) {
+    lines.push(`<b>User Name:</b> ${userName}`);
+  }
+  if (userEmail && userEmail !== email) {
+    lines.push(`<b>User Email:</b> ${userEmail}`);
+  }
+
+  const rawMessage = clean(entry.message)
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .join("\n");
+
+  lines.push("");
+  lines.push("<b>Message:</b>");
+  lines.push(rawMessage || "(empty)");
+
+  const maxLen = 1000;
+  let text = lines.join("\n");
+  if (text.length > maxLen) {
+    text = `${text.slice(0, maxLen - 20)}\n... (truncated)`;
+  }
+  return text;
+};
+
 app.post("/api/contact", async (req, res) => {
   const body = req.body || {};
   const requestId = String(req.headers["x-contact-request-id"] || body.requestId || "").trim();
@@ -117,6 +163,12 @@ app.post("/api/contact", async (req, res) => {
     origin: req.headers.origin || "",
     ip: (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "",
   });
+
+  const contactIp = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "";
+  const contactThrottle = allowSensitiveAttempt(scopeForIp("contact", contactIp));
+  if (!contactThrottle.allowed) {
+    return res.status(429).json({ error: "Too many contact requests. Please wait a few minutes and try again." });
+  }
 
   if (website) {
     return res.json({ ok: true });
@@ -166,18 +218,7 @@ app.post("/api/contact", async (req, res) => {
       return res.status(503).json({ error: "Pushover delivery not configured." });
     }
 
-    const messageLines = [
-      `<b>Name:</b> ${entry.name}`,
-      `<b>Email:</b> ${entry.email}`,
-      entry.subject ? `<b>Subject:</b> ${entry.subject}` : "",
-      entry.userName ? `<b>User Name:</b> ${entry.userName}` : "",
-      entry.userEmail ? `<b>User Email:</b> ${entry.userEmail}` : "",
-      entry.role ? `<b>Role:</b> ${entry.role}` : "",
-      entry.workspaceName ? `<b>Workspace:</b> ${entry.workspaceName}` : "",
-      `<b>IP:</b> ${entry.ip}`,
-      "",
-      entry.message,
-    ].filter(Boolean).join("\n");
+    const messageLines = formatContactPushoverMessage(entry);
 
     sendViaPushover({
       title: `SyncBoard Contact${workspaceName ? ` • ${workspaceName}` : ""}${subject ? ` • ${subject}` : ""}`,
@@ -384,6 +425,42 @@ async function loadUserFromDB(email) {
  const workspaces  = {};
 const MAX_HISTORY = Infinity;
  const users = {};
+
+const ATTEMPT_WINDOW_MS = 10 * 60 * 1000;
+const MAX_ATTEMPTS_PER_WINDOW = 8;
+const sensitiveAttemptBuckets = new Map();
+
+function getAttemptBucket(scope) {
+  const now = Date.now();
+  const existing = sensitiveAttemptBuckets.get(scope);
+  if (!existing || existing.expiresAt <= now) {
+    const fresh = { count: 0, expiresAt: now + ATTEMPT_WINDOW_MS };
+    sensitiveAttemptBuckets.set(scope, fresh);
+    return fresh;
+  }
+  return existing;
+}
+
+function allowSensitiveAttempt(scope) {
+  const bucket = getAttemptBucket(scope);
+  if (bucket.count >= MAX_ATTEMPTS_PER_WINDOW) {
+    return {
+      allowed: false,
+      retryAfterMs: Math.max(0, bucket.expiresAt - Date.now()),
+    };
+  }
+
+  bucket.count += 1;
+  return { allowed: true, retryAfterMs: 0 };
+}
+
+function scopeForEmail(eventName, email) {
+  return `${eventName}:${String(email || "").trim().toLowerCase()}`;
+}
+
+function scopeForIp(eventName, ip) {
+  return `${eventName}:${String(ip || "").trim().toLowerCase()}`;
+}
 
 const FREE_TASK_LIMIT = 3;
 const PRO_TASK_LIMIT  = 3000;
@@ -671,6 +748,10 @@ io.on("connection", (socket) => {
       return socket.emit("auth_error", "Email and password are required.");
     }
     const key = email.toLowerCase().trim();
+    const authThrottle = allowSensitiveAttempt(scopeForEmail("auth_user", key));
+    if (!authThrottle.allowed) {
+      return socket.emit("auth_error", "Too many login attempts. Please wait a few minutes and try again.");
+    }
     console.log(`[auth_user] Auth attempt for ${key}`);
     let existing = users[key];
 
@@ -762,6 +843,10 @@ io.on("connection", (socket) => {
     if (!key || !proPin) {
       return socket.emit("pro_activate_error", "Valid email and activation PIN are required.");
     }
+    const proThrottle = allowSensitiveAttempt(scopeForEmail("set_user_pro", key));
+    if (!proThrottle.allowed) {
+      return socket.emit("pro_activate_error", "Too many activation attempts. Please wait a few minutes and try again.");
+    }
     const pinOk = await verifyProPinWithWorker(proPin);
     if (!pinOk) {
       return socket.emit("pro_activate_error", "Invalid or expired activation PIN.");
@@ -820,6 +905,10 @@ io.on("connection", (socket) => {
     const { workspaceName, password, projectName, userName, isCreating } = data;
      const rawEmail = data.userEmail || data.email || (data.user && data.user.email) || "";
     const email = rawEmail.trim().toLowerCase();
+    const joinThrottle = allowSensitiveAttempt(scopeForEmail("join_workspace", email || workspaceName));
+    if (!joinThrottle.allowed) {
+      return socket.emit("error_msg", "Too many workspace attempts. Please wait a few minutes and try again.");
+    }
     devLog(`[join_workspace] ${userName} @ ${workspaceName}`);
     if (!workspaceName || !password || !userName || !email) {
       console.error(`[join_workspace] ✗ Missing required fields!`, { workspaceName: !!workspaceName, password: !!password, userName: !!userName, email: !!email });
@@ -962,6 +1051,10 @@ io.on("connection", (socket) => {
     const { workspaceName, userName } = data;
      const rawEmail = data.userEmail || data.email || (data.user && data.user.email) || "";
     const email = rawEmail.trim().toLowerCase();
+    const rejoinThrottle = allowSensitiveAttempt(scopeForEmail("rejoin_workspace", email || workspaceName));
+    if (!rejoinThrottle.allowed) {
+      return socket.emit("error_msg", "Too many reconnect attempts. Please wait a few minutes and try again.");
+    }
     console.log(`DEBUG: Extracted email from payload - Raw: "${rawEmail}" | Normalized: "${email}"`);
     
     console.log(`  User: ${userName} | Workspace: ${workspaceName} | Email: ${email} | SocketID: ${socket.id}`);
@@ -1169,6 +1262,10 @@ io.on("connection", (socket) => {
   });
    socket.on("delete_workspace", async ({ workspaceName, email }) => {
     console.log(`[delete_workspace] User: ${email} | Workspace: ${workspaceName}`);
+    const deleteThrottle = allowSensitiveAttempt(scopeForEmail("delete_workspace", email || workspaceName));
+    if (!deleteThrottle.allowed) {
+      return socket.emit("error_msg", "Too many delete attempts. Please wait a few minutes and try again.");
+    }
     
     const ws = workspaces[workspaceName];
     if (!ws) {
@@ -1196,6 +1293,10 @@ io.on("connection", (socket) => {
     socket.emit("workspace_deleted_success");
   });
    socket.on("clear_history", async ({ workspaceName }) => {
+    const clearThrottle = allowSensitiveAttempt(scopeForEmail("clear_history", workspaceName));
+    if (!clearThrottle.allowed) {
+      return socket.emit("permission_denied", "Too many history actions. Please wait a few minutes and try again.");
+    }
     const ws = workspaces[workspaceName];
     if (!ws) return;
     const user = ws.sockets.get(socket.id);
