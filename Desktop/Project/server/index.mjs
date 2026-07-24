@@ -179,10 +179,19 @@ app.post("/api/contact", async (req, res) => {
       entry.message,
     ].filter(Boolean).join("\n");
 
-    await sendViaPushover({
+    sendViaPushover({
       title: `SyncBoard Contact${workspaceName ? ` • ${workspaceName}` : ""}${subject ? ` • ${subject}` : ""}`,
       message: messageLines,
+    }).catch((err) => {
+      logNotificationError(err, {
+        stage: "contact-route-async-send",
+        requestId,
+        workspaceName: entry.workspaceName,
+        email: entry.email,
+        provider: "pushover",
+      });
     });
+
     return res.json({ ok: true });
   } catch (err) {
     logNotificationError(err, { stage: "contact-route", requestId, workspaceName: entry.workspaceName, email: entry.email, provider: "pushover" });
