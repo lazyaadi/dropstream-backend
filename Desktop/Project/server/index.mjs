@@ -48,6 +48,9 @@ const sendViaPushover = async (payload) => {
   }
 
   const startedAt = Date.now();
+  const timeoutMs = 10000;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error("Pushover request timed out.")), timeoutMs);
   const body = new URLSearchParams();
   body.set("token", PUSHOVER_TOKEN);
   body.set("user", PUSHOVER_USER_KEY);
@@ -68,6 +71,7 @@ const sendViaPushover = async (payload) => {
         "Content-Type": "application/x-www-form-urlencoded",
       },
       body: body.toString(),
+      signal: controller.signal,
     });
 
     const responseText = await response.text();
@@ -84,6 +88,8 @@ const sendViaPushover = async (payload) => {
   } catch (err) {
     logNotificationError(err, { stage: "pushover-send", durationMs: Date.now() - startedAt });
     throw err;
+  } finally {
+    clearTimeout(timeout);
   }
 };
 
