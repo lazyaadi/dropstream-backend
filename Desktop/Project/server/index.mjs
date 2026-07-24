@@ -30,7 +30,25 @@ const SMTP_USER = process.env.SMTP_USER || "";
 const SMTP_PASS = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
 const CONTACT_EMAIL_TO = process.env.CONTACT_EMAIL_TO || SMTP_USER || "";
 const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
-const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || "SyncBoard <onboarding@resend.dev>";
+const RESEND_DEFAULT_FROM_EMAIL = "onboarding@resend.dev";
+const normalizeResendFromEmail = (value) => {
+  const text = String(value || "").trim();
+  if (!text) return `SyncBoard <${RESEND_DEFAULT_FROM_EMAIL}>`;
+
+  const angleMatch = text.match(/<([^>]+)>/);
+  const extractedEmail = angleMatch?.[1]?.trim();
+  if (extractedEmail && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(extractedEmail)) {
+    const displayName = text.slice(0, angleMatch.index).trim().replace(/\s+$/, "");
+    return displayName ? `${displayName} <${extractedEmail}>` : extractedEmail;
+  }
+
+  if (/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)) {
+    return text;
+  }
+
+  return `SyncBoard <${RESEND_DEFAULT_FROM_EMAIL}>`;
+};
+const RESEND_FROM_EMAIL = normalizeResendFromEmail(process.env.RESEND_FROM_EMAIL || "SyncBoard <onboarding@resend.dev>");
 const CONTACT_EMAIL_PROVIDER = (process.env.CONTACT_EMAIL_PROVIDER || (RESEND_API_KEY ? "resend" : "smtp")).toLowerCase();
 
 const maskEmail = (value) => {
