@@ -30,6 +30,33 @@ const SMTP_USER = process.env.SMTP_USER || "";
 const SMTP_PASS = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
 const CONTACT_EMAIL_TO = process.env.CONTACT_EMAIL_TO || SMTP_USER || "";
 
+const maskEmail = (value) => {
+  const text = String(value || "").trim();
+  if (!text) return "";
+  const [local, domain] = text.split("@");
+  if (!domain) return text;
+  const head = local.slice(0, 2);
+  return `${head}${local.length > 2 ? "***" : ""}@${domain}`;
+};
+
+const logMailError = (err, context = {}) => {
+  const details = {
+    message: err?.message,
+    code: err?.code,
+    command: err?.command,
+    response: err?.response,
+    responseCode: err?.responseCode,
+    errno: err?.errno,
+    syscall: err?.syscall,
+    address: err?.address,
+    port: err?.port,
+    host: err?.host,
+    context,
+  };
+  console.error("[contact] SMTP error:", JSON.stringify(details, null, 2));
+  if (err?.stack) console.error("[contact] SMTP stack:\n" + err.stack);
+};
+
 const mailTransporter = SMTP_USER && SMTP_PASS
   ? nodemailer.createTransport({
       host: "smtp.gmail.com",
@@ -46,6 +73,13 @@ const mailTransporter = SMTP_USER && SMTP_PASS
   : null;
 
 if (mailTransporter) {
+  console.log("[startup] SMTP transporter configured:", {
+    user: maskEmail(SMTP_USER),
+    to: maskEmail(CONTACT_EMAIL_TO),
+    host: "smtp.gmail.com",
+    port: 465,
+    secure: true,
+  });
   mailTransporter.verify()
     .then(() => devLog("[startup] SMTP transporter verified"))
     .catch((err) => console.error("[startup] SMTP transporter verification failed:", err.message));
@@ -84,10 +118,35 @@ const contactMessages = [];
 
 const sendMailWithTimeout = async (mailOptions, timeoutMs = 12000) => {
   if (!mailTransporter) throw new Error("Email delivery not configured.");
+  const startedAt = Date.now();
+  console.log("[contact] sending email:", {
+    to: maskEmail(mailOptions.to),
+    replyTo: maskEmail(mailOptions.replyTo),
+    subject: mailOptions.subject,
+    timeoutMs,
+  });
   return Promise.race([
-    mailTransporter.sendMail(mailOptions),
+    mailTransporter.sendMail(mailOptions).then((info) => {
+      console.log("[contact] email sent:", {
+        messageId: info?.messageId,
+        accepted: info?.accepted,
+        rejected: info?.rejected,
+        durationMs: Date.now() - startedAt,
+      });
+      return info;
+    }).catch((err) => {
+      logMailError(err, { stage: "sendMail", durationMs: Date.now() - startedAt });
+      throw err;
+    }),
     new Promise((_, reject) => {
-      setTimeout(() => reject(new Error("Email delivery timed out.")), timeoutMs);
+      setTimeout(() => {
+        console.error("[contact] email send timeout:", {
+          timeoutMs,
+          durationMs: Date.now() - startedAt,
+          to: maskEmail(mailOptions.to),
+        });
+        reject(new Error("Email delivery timed out."));
+      }, timeoutMs);
     }),
   ]);
 };
@@ -172,7 +231,7 @@ app.post("/api/contact", async (req, res) => {
     });
     return res.json({ ok: true });
   } catch (err) {
-    console.error("[contact] Failed to send email:", err.message);
+    logMailError(err, { stage: "contact-route", workspaceName: entry.workspaceName, email: entry.email });
     return res.status(500).json({ error: "Failed to send email." });
   }
 });
