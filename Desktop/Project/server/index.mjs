@@ -163,6 +163,16 @@ app.post("/api/contact", async (req, res) => {
   const userEmail = String(body.userEmail || "").trim().toLowerCase().slice(0, 120);
   const role = String(body.role || "").trim().slice(0, 40);
 
+  console.log("[contact] request received:", {
+    name: name || userName || "Anonymous",
+    email: maskEmail(email),
+    subject,
+    workspaceName,
+    role,
+    origin: req.headers.origin || "",
+    ip: (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "",
+  });
+
   if (website) {
     return res.json({ ok: true });
   }
