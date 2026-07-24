@@ -29,6 +29,9 @@ const devLog = (...args) => { if (IS_DEV) console.log(...args); };
 const SMTP_USER = process.env.SMTP_USER || "";
 const SMTP_PASS = (process.env.SMTP_PASS || "").replace(/\s+/g, "");
 const CONTACT_EMAIL_TO = process.env.CONTACT_EMAIL_TO || SMTP_USER || "";
+const RESEND_API_KEY = process.env.RESEND_API_KEY || "";
+const RESEND_FROM_EMAIL = process.env.RESEND_FROM_EMAIL || "SyncBoard <onboarding@resend.dev>";
+const CONTACT_EMAIL_PROVIDER = (process.env.CONTACT_EMAIL_PROVIDER || (RESEND_API_KEY ? "resend" : "smtp")).toLowerCase();
 
 const maskEmail = (value) => {
   const text = String(value || "").trim();
@@ -84,6 +87,55 @@ if (mailTransporter) {
     .then(() => devLog("[startup] SMTP transporter verified"))
     .catch((err) => console.error("[startup] SMTP transporter verification failed:", err.message));
 }
+
+const sendViaResendWithTimeout = async (mailOptions, timeoutMs = 12000) => {
+  if (!RESEND_API_KEY) throw new Error("Resend email delivery not configured.");
+  const startedAt = Date.now();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort("resend timeout"), timeoutMs);
+
+  console.log("[contact] sending email via resend:", {
+    from: RESEND_FROM_EMAIL,
+    to: maskEmail(mailOptions.to),
+    replyTo: maskEmail(mailOptions.replyTo),
+    subject: mailOptions.subject,
+    timeoutMs,
+  });
+
+  try {
+    const response = await fetch("https://api.resend.com/emails", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${RESEND_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        from: RESEND_FROM_EMAIL,
+        to: [mailOptions.to],
+        subject: mailOptions.subject,
+        text: mailOptions.text,
+        reply_to: mailOptions.replyTo,
+      }),
+      signal: controller.signal,
+    });
+
+    const responseText = await response.text();
+    if (!response.ok) {
+      throw new Error(`Resend HTTP ${response.status}: ${responseText.slice(0, 500)}`);
+    }
+
+    console.log("[contact] resend email sent:", {
+      durationMs: Date.now() - startedAt,
+      responsePreview: responseText.slice(0, 500),
+    });
+    return responseText;
+  } catch (err) {
+    logMailError(err, { stage: "resend-send", durationMs: Date.now() - startedAt });
+    throw err;
+  } finally {
+    clearTimeout(timeout);
+  }
+};
 
 const app    = express();
 const server = http.createServer(app);
@@ -173,6 +225,19 @@ const sendMailWithTimeout = async (mailOptions, timeoutMs = 12000) => {
   ]);
 };
 
+const sendContactEmail = async (mailOptions) => {
+  if (CONTACT_EMAIL_PROVIDER === "resend") {
+    return sendViaResendWithTimeout(mailOptions);
+  }
+  if (CONTACT_EMAIL_PROVIDER === "smtp") {
+    return sendMailWithTimeout(mailOptions);
+  }
+  if (RESEND_API_KEY) {
+    return sendViaResendWithTimeout(mailOptions);
+  }
+  return sendMailWithTimeout(mailOptions);
+};
+
 app.post("/api/contact", async (req, res) => {
   const body = req.body || {};
   const requestId = String(req.headers["x-contact-request-id"] || body.requestId || "").trim();
@@ -188,6 +253,7 @@ app.post("/api/contact", async (req, res) => {
 
   console.log("[contact] request received:", {
     requestId,
+    provider: CONTACT_EMAIL_PROVIDER,
     name: name || userName || "Anonymous",
     email: maskEmail(email),
     subject,
@@ -239,7 +305,9 @@ app.post("/api/contact", async (req, res) => {
   }
 
   if (!mailTransporter || !CONTACT_EMAIL_TO) {
-    return res.status(503).json({ error: "Email delivery not configured." });
+    if (!(RESEND_API_KEY && CONTACT_EMAIL_PROVIDER === "resend")) {
+      return res.status(503).json({ error: "Email delivery not configured." });
+    }
   }
 
   const mailSubject = `SyncBoard Support${workspaceName ? ` • ${workspaceName}` : ""}${subject ? ` • ${subject}` : ""}`;
@@ -257,7 +325,7 @@ app.post("/api/contact", async (req, res) => {
   ].filter(Boolean).join("\n");
 
   try {
-    await sendMailWithTimeout({
+    await sendContactEmail({
       from: `SyncBoard Contact <${SMTP_USER}>`,
       to: CONTACT_EMAIL_TO,
       replyTo: entry.email,
