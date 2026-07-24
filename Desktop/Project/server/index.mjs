@@ -108,7 +108,9 @@ app.use(cors({
 app.use((req, res, next) => {
   if (req.path === "/api/contact") {
     const startedAt = Date.now();
+    const requestId = req.headers["x-contact-request-id"] || "";
     console.log("[contact] request entered middleware:", {
+      requestId,
       method: req.method,
       origin: req.headers.origin || "",
       contentType: req.headers["content-type"] || "",
@@ -173,6 +175,7 @@ const sendMailWithTimeout = async (mailOptions, timeoutMs = 12000) => {
 
 app.post("/api/contact", async (req, res) => {
   const body = req.body || {};
+  const requestId = String(req.headers["x-contact-request-id"] || body.requestId || "").trim();
   const name = String(body.name || "").trim().slice(0, 80);
   const email = String(body.email || "").trim().toLowerCase().slice(0, 120);
   const subject = String(body.subject || "").trim().slice(0, 120);
@@ -184,6 +187,7 @@ app.post("/api/contact", async (req, res) => {
   const role = String(body.role || "").trim().slice(0, 40);
 
   console.log("[contact] request received:", {
+    requestId,
     name: name || userName || "Anonymous",
     email: maskEmail(email),
     subject,
@@ -207,6 +211,7 @@ app.post("/api/contact", async (req, res) => {
   const ip = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "";
   const ua = String(req.headers["user-agent"] || "").slice(0, 300);
   const entry = {
+    requestId,
     name: name || userName || "Anonymous",
     email,
     subject,
@@ -261,7 +266,7 @@ app.post("/api/contact", async (req, res) => {
     });
     return res.json({ ok: true });
   } catch (err) {
-    logMailError(err, { stage: "contact-route", workspaceName: entry.workspaceName, email: entry.email });
+    logMailError(err, { stage: "contact-route", requestId, workspaceName: entry.workspaceName, email: entry.email });
     return res.status(500).json({ error: "Failed to send email." });
   }
 });
