@@ -6,6 +6,7 @@ import cors     from "cors";
 import dotenv   from "dotenv";
 import mongoose from "mongoose";
 import rateLimit from "express-rate-limit";
+import { createHmac } from "crypto";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import {
@@ -16,14 +17,15 @@ import {
   isOriginAllowed,
 } from "./security.mjs";
 
-const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
-
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 dotenv.config({ path: join(__dirname, ".env") });
 
 const IS_DEV = process.env.NODE_ENV !== "production";
 const ALLOWED_ORIGINS = parseAllowedOrigins();
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
+const GOOGLE_REDIRECT_TOKEN_SECRET = process.env.GOOGLE_REDIRECT_TOKEN_SECRET || process.env.ADMIN_SECRET || "";
+const PRIMARY_CLIENT_URL = ALLOWED_ORIGINS[0] || "http://localhost:5173";
 const devLog = (...args) => { if (IS_DEV) console.log(...args); };
 const PUSHOVER_TOKEN = process.env.PUSHOVER_TOKEN || "";
 const PUSHOVER_USER_KEY = process.env.PUSHOVER_USER_KEY || "";
@@ -140,6 +142,26 @@ const formatContactPushoverMessage = (entry) => {
   }
   return text;
 };
+
+app.post("/auth/google/callback", express.urlencoded({ extended: false }), async (req, res) => {
+  const credential = String(req.body?.credential || req.body?.id_token || "").trim();
+  const clientUrl = getClientRedirectUrl(req);
+  const verified = await verifyGoogleToken(credential);
+
+  if (!verified.ok) {
+    return res.redirect(`${clientUrl}?google_auth_error=${encodeURIComponent("Google sign-in could not be verified. Please try again.")}`);
+  }
+
+  const token = signGoogleRedirectPayload({
+    email: verified.email,
+    name: verified.name,
+    picture: verified.picture || null,
+    sub: verified.sub || null,
+    exp: Date.now() + (5 * 60 * 1000),
+  });
+
+  return res.redirect(`${clientUrl}?google_auth_token=${encodeURIComponent(token)}`);
+});
 
 app.post("/api/contact", async (req, res) => {
   const body = req.body || {};
@@ -569,6 +591,139 @@ async function verifyGoogleToken(credential) {
   }
 }
 
+function signGoogleRedirectPayload(payload) {
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig = createHmac("sha256", GOOGLE_REDIRECT_TOKEN_SECRET).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+
+function verifyGoogleRedirectPayload(token) {
+  const raw = String(token || "").trim();
+  if (!raw) return null;
+  const parts = raw.split(".");
+  if (parts.length !== 2) return null;
+  const [body, sig] = parts;
+  const expected = createHmac("sha256", GOOGLE_REDIRECT_TOKEN_SECRET).update(body).digest("base64url");
+  if (sig !== expected) return null;
+
+  try {
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    if (!payload?.email || !payload?.name || !payload?.exp) return null;
+    if (Date.now() > Number(payload.exp)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
+}
+
+function getClientRedirectUrl(req) {
+  const origin = String(req.headers.origin || "").trim();
+  if (origin && isOriginAllowed(origin, ALLOWED_ORIGINS)) return origin;
+
+  const referer = String(req.headers.referer || "").trim();
+  if (referer) {
+    try {
+      const refererOrigin = new URL(referer).origin;
+      if (isOriginAllowed(refererOrigin, ALLOWED_ORIGINS)) return refererOrigin;
+    } catch {}
+  }
+
+  return ALLOWED_ORIGINS.find((value) => value.startsWith("https://")) || PRIMARY_CLIENT_URL;
+}
+
+function finalizeGoogleAuth(socket, payload, source = "google") {
+  const email = String(payload.email || "").toLowerCase().trim();
+  const displayName = String(payload.name || payload.email?.split("@")[0] || "").trim();
+  if (!email || !displayName) {
+    socket.emit(source === "redirect" ? "auth_google_error" : "auth_google_error", "Google sign-in could not be completed.");
+    return;
+  }
+
+  const key = email;
+  let existing = users[key];
+
+  const finalizeExisting = (userRecord) => {
+    userRecord.authProvider = "google";
+    userRecord.googleSub = payload.sub || userRecord.googleSub || null;
+    userRecord.googlePicture = payload.picture || userRecord.googlePicture || null;
+    if (displayName && displayName !== userRecord.name) {
+      userRecord.name = displayName;
+    }
+    if (userRecord.resetAt && new Date() > new Date(userRecord.resetAt)) {
+      userRecord.taskCount = 0;
+      userRecord.resetAt = null;
+      userRecord.taskIds = [];
+    }
+    saveUserToDB(email).catch(err => console.error("[finalizeGoogleAuth] Error saving existing user:", err.message));
+    ensureProValidity(email);
+    const { count, resetAt } = getUserTaskData(email);
+    socket.emit("auth_success", {
+      email: key,
+      name: userRecord.name,
+      isPro: userRecord.isPro,
+      taskCount: count,
+      resetAt,
+      proExpiresAt: userRecord.proExpiresAt || null,
+    });
+  };
+
+  const finalizeNew = () => {
+    users[key] = {
+      name: displayName,
+      passwordHash: null,
+      taskCount: 0,
+      resetAt: null,
+      taskIds: [],
+      isPro: false,
+      proPin: null,
+      proActivatedAt: null,
+      proExpiresAt: null,
+      authProvider: "google",
+      googleSub: payload.sub || null,
+      googlePicture: payload.picture || null,
+    };
+    saveUserToDB(email).catch(err => console.error("[finalizeGoogleAuth] Error saving new user:", err.message));
+    socket.emit("auth_success", {
+      email: key,
+      name: displayName,
+      isPro: false,
+      taskCount: 0,
+      resetAt: null,
+      proExpiresAt: null,
+    });
+  };
+
+  if (existing) {
+    finalizeExisting(existing);
+    return;
+  }
+
+  loadUserFromDB(email).then((dbUser) => {
+    if (dbUser) {
+      users[key] = {
+        name: dbUser.name,
+        passwordHash: dbUser.passwordHash,
+        taskCount: dbUser.taskCount || 0,
+        resetAt: dbUser.resetAt,
+        taskIds: dbUser.taskIds || [],
+        isPro: dbUser.isPro || false,
+        proPin: dbUser.proPin,
+        proActivatedAt: dbUser.proActivatedAt || null,
+        proExpiresAt: dbUser.proExpiresAt || null,
+        authProvider: dbUser.authProvider || "google",
+        googleSub: dbUser.googleSub || payload.sub || null,
+        googlePicture: dbUser.googlePicture || payload.picture || null,
+      };
+      finalizeExisting(users[key]);
+      return;
+    }
+    finalizeNew();
+  }).catch((err) => {
+    console.error("[finalizeGoogleAuth] Error hydrating user:", err.message);
+    finalizeNew();
+  });
+}
+
 async function upgradeWorkspacePinIfNeeded(ws, workspaceName, plainPin) {
   const upgraded = await maybeUpgradeWorkspacePin(plainPin, ws.password);
   if (upgraded !== ws.password) {
@@ -872,84 +1027,32 @@ io.on("connection", (socket) => {
       return socket.emit("auth_google_error", "Google sign-in could not be verified. Please try again.");
     }
 
-    const email = tokenCheck.email;
-    const displayName = String(name || tokenCheck.name || "").trim() || tokenCheck.name;
-    const key = email.toLowerCase().trim();
+    const key = tokenCheck.email.toLowerCase().trim();
     const authThrottle = allowSensitiveAttempt(scopeForEmail("auth_google", key));
     if (!authThrottle.allowed) {
       return socket.emit("auth_google_error", "Too many login attempts. Please wait a few minutes and try again.");
     }
 
-    let existing = users[key];
-    if (!existing) {
-      const dbUser = await loadUserFromDB(email);
-      if (dbUser) {
-        users[key] = {
-          name: dbUser.name,
-          passwordHash: dbUser.passwordHash,
-          taskCount: dbUser.taskCount || 0,
-          resetAt: dbUser.resetAt,
-          taskIds: dbUser.taskIds || [],
-          isPro: dbUser.isPro || false,
-          proPin: dbUser.proPin,
-          proActivatedAt: dbUser.proActivatedAt || null,
-          proExpiresAt: dbUser.proExpiresAt || null,
-          authProvider: dbUser.authProvider || "google",
-          googleSub: dbUser.googleSub || tokenCheck.sub || null,
-          googlePicture: dbUser.googlePicture || tokenCheck.picture || null,
-        };
-        existing = users[key];
-      }
+    finalizeGoogleAuth(socket, {
+      email: tokenCheck.email,
+      name: String(name || tokenCheck.name || "").trim() || tokenCheck.name,
+      picture: tokenCheck.picture || null,
+      sub: tokenCheck.sub || null,
+    }, "google");
+  });
+
+  socket.on("auth_google_redirect_token", ({ token }) => {
+    const verified = verifyGoogleRedirectPayload(token);
+    if (!verified) {
+      return socket.emit("auth_google_error", "Google sign-in could not be verified. Please try again.");
     }
 
-    if (existing) {
-      existing.authProvider = "google";
-      existing.googleSub = tokenCheck.sub || existing.googleSub || null;
-      existing.googlePicture = tokenCheck.picture || existing.googlePicture || null;
-      if (displayName && displayName !== existing.name) {
-        existing.name = displayName;
-      }
-      if (existing.resetAt && new Date() > new Date(existing.resetAt)) {
-        existing.taskCount = 0;
-        existing.resetAt = null;
-        existing.taskIds = [];
-      }
-      await saveUserToDB(email);
-      ensureProValidity(email);
-      const { count, resetAt } = getUserTaskData(email);
-      return socket.emit("auth_success", {
-        email: key,
-        name: existing.name,
-        isPro: existing.isPro,
-        taskCount: count,
-        resetAt,
-        proExpiresAt: existing.proExpiresAt || null,
-      });
+    const authThrottle = allowSensitiveAttempt(scopeForEmail("auth_google", verified.email));
+    if (!authThrottle.allowed) {
+      return socket.emit("auth_google_error", "Too many login attempts. Please wait a few minutes and try again.");
     }
 
-    users[key] = {
-      name: displayName,
-      passwordHash: null,
-      taskCount: 0,
-      resetAt: null,
-      taskIds: [],
-      isPro: false,
-      proPin: null,
-      proActivatedAt: null,
-      proExpiresAt: null,
-      authProvider: "google",
-      googleSub: tokenCheck.sub || null,
-      googlePicture: tokenCheck.picture || null,
-    };
-    await saveUserToDB(email);
-    return socket.emit("auth_success", {
-      email: key,
-      name: displayName,
-      isPro: false,
-      taskCount: 0,
-      resetAt: null,
-      proExpiresAt: null,
-    });
+    finalizeGoogleAuth(socket, verified, "redirect");
   });
 
   socket.on("check_pro_status", ({ email, proPin }) => {
