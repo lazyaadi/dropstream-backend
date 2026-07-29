@@ -16,6 +16,8 @@ import {
   isOriginAllowed,
 } from "./security.mjs";
 
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 dotenv.config({ path: join(__dirname, ".env") });
@@ -377,6 +379,9 @@ async function saveUserToDB(email) {
           proPin: user.proPin,
           proActivatedAt: user.proActivatedAt || null,
           proExpiresAt: user.proExpiresAt || null,
+          authProvider: user.authProvider || null,
+          googleSub: user.googleSub || null,
+          googlePicture: user.googlePicture || null,
           updatedAt: new Date().toISOString(),
         }
       },
@@ -412,6 +417,9 @@ async function loadUserFromDB(email) {
         proPin: doc.proPin,
         proActivatedAt: doc.proActivatedAt || null,
         proExpiresAt: doc.proExpiresAt || null,
+        authProvider: doc.authProvider || null,
+        googleSub: doc.googleSub || null,
+        googlePicture: doc.googlePicture || null,
       };
     }
     
@@ -528,6 +536,37 @@ async function verifyLogin(email, password) {
   }
 
   return { ok: true, user, key };
+}
+
+async function verifyGoogleToken(credential) {
+  const token = String(credential || "").trim();
+  if (!token) return { ok: false, reason: "missing_token" };
+
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 5000);
+    const response = await fetch(`https://oauth2.googleapis.com/tokeninfo?id_token=${encodeURIComponent(token)}`, {
+      signal: controller.signal,
+    });
+    clearTimeout(timeout);
+
+    if (!response.ok) return { ok: false, reason: "invalid_token" };
+    const payload = await response.json();
+
+    if (!payload?.email || !payload?.sub) return { ok: false, reason: "invalid_token" };
+    if (GOOGLE_CLIENT_ID && payload.aud && payload.aud !== GOOGLE_CLIENT_ID) return { ok: false, reason: "bad_audience" };
+    if (payload.email_verified && String(payload.email_verified).toLowerCase() !== "true") return { ok: false, reason: "unverified_email" };
+
+    return {
+      ok: true,
+      email: String(payload.email).toLowerCase().trim(),
+      name: String(payload.name || payload.email.split("@")[0]).trim(),
+      picture: payload.picture || null,
+      sub: payload.sub || null,
+    };
+  } catch {
+    return { ok: false, reason: "invalid_token" };
+  }
 }
 
 async function upgradeWorkspacePinIfNeeded(ws, workspaceName, plainPin) {
@@ -825,6 +864,92 @@ io.on("connection", (socket) => {
         proExpiresAt: null,
       });
     }
+  });
+
+  socket.on("auth_google", async ({ credential, name }) => {
+    const tokenCheck = await verifyGoogleToken(credential);
+    if (!tokenCheck.ok) {
+      return socket.emit("auth_google_error", "Google sign-in could not be verified. Please try again.");
+    }
+
+    const email = tokenCheck.email;
+    const displayName = String(name || tokenCheck.name || "").trim() || tokenCheck.name;
+    const key = email.toLowerCase().trim();
+    const authThrottle = allowSensitiveAttempt(scopeForEmail("auth_google", key));
+    if (!authThrottle.allowed) {
+      return socket.emit("auth_google_error", "Too many login attempts. Please wait a few minutes and try again.");
+    }
+
+    let existing = users[key];
+    if (!existing) {
+      const dbUser = await loadUserFromDB(email);
+      if (dbUser) {
+        users[key] = {
+          name: dbUser.name,
+          passwordHash: dbUser.passwordHash,
+          taskCount: dbUser.taskCount || 0,
+          resetAt: dbUser.resetAt,
+          taskIds: dbUser.taskIds || [],
+          isPro: dbUser.isPro || false,
+          proPin: dbUser.proPin,
+          proActivatedAt: dbUser.proActivatedAt || null,
+          proExpiresAt: dbUser.proExpiresAt || null,
+          authProvider: dbUser.authProvider || "google",
+          googleSub: dbUser.googleSub || tokenCheck.sub || null,
+          googlePicture: dbUser.googlePicture || tokenCheck.picture || null,
+        };
+        existing = users[key];
+      }
+    }
+
+    if (existing) {
+      existing.authProvider = "google";
+      existing.googleSub = tokenCheck.sub || existing.googleSub || null;
+      existing.googlePicture = tokenCheck.picture || existing.googlePicture || null;
+      if (displayName && displayName !== existing.name) {
+        existing.name = displayName;
+      }
+      if (existing.resetAt && new Date() > new Date(existing.resetAt)) {
+        existing.taskCount = 0;
+        existing.resetAt = null;
+        existing.taskIds = [];
+      }
+      await saveUserToDB(email);
+      ensureProValidity(email);
+      const { count, resetAt } = getUserTaskData(email);
+      return socket.emit("auth_success", {
+        email: key,
+        name: existing.name,
+        isPro: existing.isPro,
+        taskCount: count,
+        resetAt,
+        proExpiresAt: existing.proExpiresAt || null,
+      });
+    }
+
+    users[key] = {
+      name: displayName,
+      passwordHash: null,
+      taskCount: 0,
+      resetAt: null,
+      taskIds: [],
+      isPro: false,
+      proPin: null,
+      proActivatedAt: null,
+      proExpiresAt: null,
+      authProvider: "google",
+      googleSub: tokenCheck.sub || null,
+      googlePicture: tokenCheck.picture || null,
+    };
+    await saveUserToDB(email);
+    return socket.emit("auth_success", {
+      email: key,
+      name: displayName,
+      isPro: false,
+      taskCount: 0,
+      resetAt: null,
+      proExpiresAt: null,
+    });
   });
 
   socket.on("check_pro_status", ({ email, proPin }) => {
