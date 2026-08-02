@@ -1,9 +1,8 @@
 [build]
-  # Install and build explicitly inside the `client` folder so Netlify
-  # runs `npm ci` in the frontend and publishes the built files from
-  # `client/dist` regardless of the detected base directory.
-  command = "npm ci --prefix client && npm run build --prefix client"
-  publish = "client/dist"
+  command = "npm install && npm run build"
+  publish = "dist"
 
-[context.production.environment]
-  NODE_ENV = "production"
+[[redirects]]
+  from = "/*"
+  to = "/index.html"
+  status = 200
