@@ -27,6 +27,21 @@ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_REDIRECT_TOKEN_SECRET = process.env.GOOGLE_REDIRECT_TOKEN_SECRET || process.env.ADMIN_SECRET || "";
 const PRIMARY_CLIENT_URL = ALLOWED_ORIGINS[0] || "http://localhost:5173";
 const devLog = (...args) => { if (IS_DEV) console.log(...args); };
+
+// Express and Socket.IO app/server initialization (was missing)
+const app = express();
+app.use(express.json());
+app.use(express.urlencoded({ extended: false }));
+app.use(cors({ origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : true, credentials: true }));
+
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : true,
+    methods: ["GET", "POST", "OPTIONS"],
+    credentials: true,
+  },
+});
 const PUSHOVER_TOKEN = process.env.PUSHOVER_TOKEN || "";
 const PUSHOVER_USER_KEY = process.env.PUSHOVER_USER_KEY || "";
 const logNotificationError = (err, context = {}) => {
