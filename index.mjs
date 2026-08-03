@@ -41,6 +41,7 @@ const io = new Server(server, {
     methods: ["GET", "POST", "OPTIONS"],
     credentials: true,
   },
+  transports: ["polling", "websocket"],
 });
 const PUSHOVER_TOKEN = process.env.PUSHOVER_TOKEN || "";
 const PUSHOVER_USER_KEY = process.env.PUSHOVER_USER_KEY || "";
