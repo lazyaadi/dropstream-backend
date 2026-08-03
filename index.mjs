@@ -11,7 +11,7 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 import {
   hashSecret,
-  verifyUserPassword,
+  verifyUserPassword,     
   verifyWorkspacePin,
   parseAllowedOrigins,
   isOriginAllowed,
