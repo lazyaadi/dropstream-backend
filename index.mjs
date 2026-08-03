@@ -13,6 +13,7 @@ import {
   hashSecret,
   verifyUserPassword,                 
   verifyWorkspacePin,
+  maybeUpgradeWorkspacePin,
   parseAllowedOrigins,
   isOriginAllowed,
 } from "./security.mjs";
@@ -833,10 +834,19 @@ function finalizeGoogleAuth(socket, payload, source = "google") {
 }
 
 async function upgradeWorkspacePinIfNeeded(ws, workspaceName, plainPin) {
-  const upgraded = await maybeUpgradeWorkspacePin(plainPin, ws.password);
-  if (upgraded !== ws.password) {
-    ws.password = upgraded;
-    await saveRoomToDB(workspaceName);
+  if (typeof maybeUpgradeWorkspacePin !== "function") {
+    console.warn("[upgradeWorkspacePinIfNeeded] maybeUpgradeWorkspacePin helper is unavailable; skipping pin upgrade.");
+    return;
+  }
+
+  try {
+    const upgraded = await maybeUpgradeWorkspacePin(plainPin, ws.password);
+    if (upgraded !== ws.password) {
+      ws.password = upgraded;
+      await saveRoomToDB(workspaceName);
+    }
+  } catch (err) {
+    console.warn("[upgradeWorkspacePinIfNeeded] Pin upgrade failed; continuing join flow without upgrade.", err?.message || err);
   }
 }
 
