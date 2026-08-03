@@ -28,20 +28,74 @@ const GOOGLE_REDIRECT_TOKEN_SECRET = process.env.GOOGLE_REDIRECT_TOKEN_SECRET ||
 const PRIMARY_CLIENT_URL = ALLOWED_ORIGINS[0] || "http://localhost:5173";
 const devLog = (...args) => { if (IS_DEV) console.log(...args); };
 
+process.on("unhandledRejection", (reason, promise) => {
+  console.error("Unhandled Rejection at:", promise, "reason:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("Uncaught Exception thrown:", err);
+});
+
 // Express and Socket.IO app/server initialization (was missing)
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
-app.use(cors({ origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : true, credentials: true }));
+
+const corsOrigin = ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : true;
+const setHeaderValue = (target, key, value) => {
+  if (target && typeof target.setHeader === "function") {
+    target.setHeader(key, value);
+    return;
+  }
+  if (target) {
+    target[key] = value;
+  }
+};
+
+const applyCorsHeaders = (headers, origin) => {
+  const resolvedOrigin = origin || "*";
+  setHeaderValue(headers, "Access-Control-Allow-Origin", resolvedOrigin);
+  setHeaderValue(headers, "Access-Control-Allow-Credentials", "true");
+  setHeaderValue(headers, "Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, Origin");
+  setHeaderValue(headers, "Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
+  setHeaderValue(headers, "Vary", "Origin");
+};
+
+app.use((req, res, next) => {
+  const origin = req.headers.origin;
+  if (!origin || isOriginAllowed(origin, ALLOWED_ORIGINS)) {
+    applyCorsHeaders(res, origin);
+  }
+  if (req.method === "OPTIONS") {
+    return res.sendStatus(204);
+  }
+  next();
+});
+
+app.use(cors({ origin: corsOrigin, credentials: true }));
 
 const server = http.createServer(app);
 const io = new Server(server, {
   cors: {
-    origin: ALLOWED_ORIGINS.length ? ALLOWED_ORIGINS : true,
+    origin: corsOrigin,
     methods: ["GET", "POST", "OPTIONS"],
     credentials: true,
   },
   transports: ["polling", "websocket"],
+});
+
+io.engine.on("initial_headers", (headers, req) => {
+  const origin = req.headers.origin;
+  if (!origin || isOriginAllowed(origin, ALLOWED_ORIGINS)) {
+    applyCorsHeaders(headers, origin);
+  }
+});
+
+io.engine.on("headers", (headers, req) => {
+  const origin = req.headers.origin;
+  if (!origin || isOriginAllowed(origin, ALLOWED_ORIGINS)) {
+    applyCorsHeaders(headers, origin);
+  }
 });
 const PUSHOVER_TOKEN = process.env.PUSHOVER_TOKEN || "";
 const PUSHOVER_USER_KEY = process.env.PUSHOVER_USER_KEY || "";
@@ -157,6 +211,24 @@ const formatContactPushoverMessage = (entry) => {
     text = `${text.slice(0, maxLen - 20)}\n... (truncated)`;
   }
   return text;
+};
+
+const normalizeText = (value) => String(value ?? "").trim();
+const normalizeEmail = (value) => normalizeText(value).toLowerCase();
+
+const emitWorkspaceError = (socket, message, eventName = "workspace_error") => {
+  const safeMessage = String(message || "An unexpected workspace error occurred.");
+  socket.emit("error_msg", safeMessage);
+  socket.emit("error", { message: safeMessage, event: eventName });
+};
+
+const withSocketGuard = (socket, eventName, handler) => async (data = {}) => {
+  try {
+    return await handler(data || {});
+  } catch (err) {
+    console.error(`[${eventName}] Unhandled socket error:`, err);
+    emitWorkspaceError(socket, "An unexpected workspace error occurred. Please try again.", eventName);
+  }
 };
 
 app.post("/auth/google/callback", express.urlencoded({ extended: false }), async (req, res) => {
@@ -316,28 +388,34 @@ async function saveRoomToDB(workspaceName) {
     console.log("[saveRoomToDB] MongoDB not connected, skipping DB save");
     return;
   }
-  
-  const ws = workspaces[workspaceName];
+
+  const key = normalizeText(workspaceName);
+  if (!key) {
+    console.warn("[saveRoomToDB] Missing workspaceName, skipping DB save");
+    return;
+  }
+
+  const ws = workspaces[key];
   if (!ws) return;
-   let creatorEmailToSave = ws.creatorEmail;
+  let creatorEmailToSave = normalizeText(ws.creatorEmail);
   if (!creatorEmailToSave) {
-    console.warn(`[saveRoomToDB] ⚠️  WARNING: ws.creatorEmail is undefined for workspace "${workspaceName}"!`);
-     const adminMember = ws.members.find(m => m.role === "admin");
+    console.warn(`[saveRoomToDB] ⚠️  WARNING: ws.creatorEmail is undefined for workspace "${key}"!`);
+    const adminMember = Array.isArray(ws.members) ? ws.members.find(m => m?.role === "admin") : null;
     if (adminMember && adminMember.email) {
-      creatorEmailToSave = adminMember.email;
+      creatorEmailToSave = normalizeText(adminMember.email);
       console.log(`[saveRoomToDB] 🔧 Using admin member as creator: "${creatorEmailToSave}"`);
     }
   }
   
-  console.log(`[saveRoomToDB] Saving workspace "${workspaceName}" with creatorEmail: "${creatorEmailToSave || "UNDEFINED"}"`);
+  console.log(`[saveRoomToDB] Saving workspace "${key}" with creatorEmail: "${creatorEmailToSave || "UNDEFINED"}"`);
   
   try {
     const collection = mongoose.connection.db.collection("workspaces");
     const result = await collection.updateOne(
-      { workspaceName: workspaceName },
+      { workspaceName: key },
       {
         $set: {
-          workspaceName: workspaceName,
+          workspaceName: key,
           password: ws.password,
           projectName: ws.projectName,
           creatorEmail: creatorEmailToSave,
@@ -349,10 +427,10 @@ async function saveRoomToDB(workspaceName) {
       },
       { upsert: true }
     );
-    
-    console.log(`[saveRoomToDB] ✓ Saved ${workspaceName} to MongoDB | creatorEmail: "${creatorEmailToSave}"`);
+
+    console.log(`[saveRoomToDB] ✓ Saved ${key} to MongoDB | creatorEmail: "${creatorEmailToSave}"`);
   } catch (err) {
-    console.error(`[saveRoomToDB] Error saving ${workspaceName}:`, err.message);
+    console.error(`[saveRoomToDB] Error saving ${key}:`, err.message);
   }
 }
 
@@ -361,13 +439,19 @@ async function loadRoomFromDB(workspaceName) {
     console.log("[loadRoomFromDB] MongoDB not connected");
     return null;
   }
+
+  const key = normalizeText(workspaceName);
+  if (!key) {
+    console.warn("[loadRoomFromDB] Missing workspaceName");
+    return null;
+  }
   
   try {
     const collection = mongoose.connection.db.collection("workspaces");
-    const doc = await collection.findOne({ workspaceName: workspaceName });
+    const doc = await collection.findOne({ workspaceName: key });
     
     if (doc) {
-      console.log(`[loadRoomFromDB] ✓ Loaded ${workspaceName} from MongoDB`);
+      console.log(`[loadRoomFromDB] ✓ Loaded ${key} from MongoDB`);
       return {
         password: doc.password,
         projectName: doc.projectName,
@@ -379,10 +463,10 @@ async function loadRoomFromDB(workspaceName) {
       };
     }
     
-    console.log(`[loadRoomFromDB] Workspace ${workspaceName} not found in MongoDB`);
+    console.log(`[loadRoomFromDB] Workspace ${key} not found in MongoDB`);
     return null;
   } catch (err) {
-    console.error(`[loadRoomFromDB] Error loading ${workspaceName}:`, err.message);
+    console.error(`[loadRoomFromDB] Error loading ${key}:`, err.message);
     return null;
   }
 }
@@ -394,7 +478,11 @@ async function saveUserToDB(email) {
     return;
   }
   
-  const key = email.toLowerCase().trim();
+  const key = normalizeEmail(email);
+  if (!key) {
+    console.warn("[saveUserToDB] Missing email, skipping user save");
+    return;
+  }
   const user = users[key];
   if (!user) {
     console.warn(`[saveUserToDB] User ${key} not found in memory!`);
@@ -437,7 +525,11 @@ async function loadUserFromDB(email) {
     return null;
   }
   
-  const key = email.toLowerCase().trim();
+  const key = normalizeEmail(email);
+  if (!key) {
+    console.warn("[loadUserFromDB] Missing email");
+    return null;
+  }
   
   try {
     const collection = mongoose.connection.db.collection("users");
@@ -524,10 +616,10 @@ function obfuscateText(seed = 0) {
 }
 
 async function registerUser(email, name, password) {
-  const key = email.toLowerCase().trim();
+  const key = normalizeEmail(email);
   const passwordHash = await hashSecret(password);
   users[key] = {
-    name: name.trim(),
+    name: normalizeText(name),
     passwordHash,
     taskCount: 0,
     resetAt: null,
@@ -542,7 +634,7 @@ async function registerUser(email, name, password) {
 }
 
 async function verifyLogin(email, password) {
-  const key = email.toLowerCase().trim();
+  const key = normalizeEmail(email);
   let user = users[key];
 
   if (!user) {
@@ -749,7 +841,7 @@ async function upgradeWorkspacePinIfNeeded(ws, workspaceName, plainPin) {
 }
 
 function getUserTaskData(email) {
-  const key  = email.toLowerCase().trim();
+  const key = normalizeEmail(email);
   const user = users[key];
   if (!user) return { count: 0, resetAt: null };
   if (user.resetAt && new Date() > new Date(user.resetAt)) {
@@ -761,7 +853,7 @@ function getUserTaskData(email) {
 }
 
 function ensureProValidity(email) {
-  const key = email.toLowerCase().trim();
+  const key = normalizeEmail(email);
   const user = users[key];
   if (!user) return false;
   if (user.isPro && !user.proActivatedAt && !user.proExpiresAt) {
@@ -791,7 +883,7 @@ function ensureProValidity(email) {
 }
 
 function incrementUserTaskCount(email, taskId) {
-  const key  = email.toLowerCase().trim();
+  const key = normalizeEmail(email);
   const user = users[key];
   if (!user) return 0;
   user.taskCount++;
@@ -805,7 +897,7 @@ function incrementUserTaskCount(email, taskId) {
 }
 
 async function ensureUserLoaded(email) {
-  const key = email.toLowerCase().trim();
+  const key = normalizeEmail(email);
   if (users[key]) return users[key];
   const dbUser = await loadUserFromDB(email);
   if (!dbUser) return null;
@@ -824,7 +916,7 @@ async function ensureUserLoaded(email) {
 }
 
 async function incrementUserTaskCountAsync(email, taskId) {
-  const key  = email.toLowerCase().trim();
+  const key = normalizeEmail(email);
   const user = await ensureUserLoaded(email);
   if (!user) return 0;
   user.taskCount++;
@@ -840,7 +932,7 @@ async function incrementUserTaskCountAsync(email, taskId) {
 }
 
 function markUserPro(email, proPin) {
-  const key  = email.toLowerCase().trim();
+  const key = normalizeEmail(email);
   const user = users[key];
   if (!user) return false;
   const now = Date.now();
@@ -858,7 +950,7 @@ function markUserPro(email, proPin) {
 }
 
 async function deactivateUserPro(email) {
-  const key  = email.toLowerCase().trim();
+  const key = normalizeEmail(email);
   const user = users[key];
   if (!user) return false;
   user.isPro = false;
@@ -953,11 +1045,11 @@ io.on("connection", (socket) => {
   console.log(`[connect] ${socket.id}`);
 
 
-  socket.on("auth_user", async ({ email, password, name }) => {
+  socket.on("auth_user", async ({ email, password, name } = {}) => {
     if (!email || !password) {
       return socket.emit("auth_error", "Email and password are required.");
     }
-    const key = email.toLowerCase().trim();
+    const key = normalizeEmail(email);
     const authThrottle = allowSensitiveAttempt(scopeForEmail("auth_user", key));
     if (!authThrottle.allowed) {
       return socket.emit("auth_error", "Too many login attempts. Please wait a few minutes and try again.");
@@ -1037,13 +1129,13 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("auth_google", async ({ credential, name }) => {
+  socket.on("auth_google", async ({ credential, name } = {}) => {
     const tokenCheck = await verifyGoogleToken(credential);
     if (!tokenCheck.ok) {
       return socket.emit("auth_google_error", "Google sign-in could not be verified. Please try again.");
     }
 
-    const key = tokenCheck.email.toLowerCase().trim();
+    const key = normalizeEmail(tokenCheck.email);
     const authThrottle = allowSensitiveAttempt(scopeForEmail("auth_google", key));
     if (!authThrottle.allowed) {
       return socket.emit("auth_google_error", "Too many login attempts. Please wait a few minutes and try again.");
@@ -1057,7 +1149,7 @@ io.on("connection", (socket) => {
     }, "google");
   });
 
-  socket.on("auth_google_redirect_token", ({ token }) => {
+  socket.on("auth_google_redirect_token", ({ token } = {}) => {
     const verified = verifyGoogleRedirectPayload(token);
     if (!verified) {
       return socket.emit("auth_google_error", "Google sign-in could not be verified. Please try again.");
@@ -1071,8 +1163,8 @@ io.on("connection", (socket) => {
     finalizeGoogleAuth(socket, verified, "redirect");
   });
 
-  socket.on("check_pro_status", ({ email, proPin }) => {
-    const key  = email?.toLowerCase().trim();
+  socket.on("check_pro_status", ({ email, proPin } = {}) => {
+    const key = normalizeEmail(email);
     const user = users[key];
     if (email) ensureProValidity(email);
     if (user && user.isPro) {
@@ -1082,8 +1174,8 @@ io.on("connection", (socket) => {
     }
   });
 
-  socket.on("set_user_pro", async ({ email, proPin }) => {
-    const key = email?.toLowerCase().trim();
+  socket.on("set_user_pro", async ({ email, proPin } = {}) => {
+    const key = normalizeEmail(email);
     if (!key || !proPin) {
       return socket.emit("pro_activate_error", "Valid email and activation PIN are required.");
     }
@@ -1125,8 +1217,8 @@ io.on("connection", (socket) => {
     });
   });
 
-  socket.on("deactivate_pro", async ({ email }) => {
-    const key = email?.toLowerCase().trim();
+  socket.on("deactivate_pro", async ({ email } = {}) => {
+    const key = normalizeEmail(email);
     if (!key) {
       return socket.emit("pro_deactivate_error", "Valid email is required.");
     }
@@ -1144,11 +1236,15 @@ io.on("connection", (socket) => {
   });
 
 
-  socket.on("join_workspace", async (data) => {
-    devLog(`[join_workspace] ${data?.workspaceName} | creating=${!!data?.isCreating}`);
-    const { workspaceName, password, projectName, userName, isCreating } = data;
-     const rawEmail = data.userEmail || data.email || (data.user && data.user.email) || "";
-    const email = rawEmail.trim().toLowerCase();
+  socket.on("join_workspace", withSocketGuard(socket, "join_workspace", async (data = {}) => {
+    const workspaceName = normalizeText(data.workspaceName);
+    const password = normalizeText(data.password);
+    const projectName = normalizeText(data.projectName);
+    const userName = normalizeText(data.userName);
+    const isCreating = !!data.isCreating;
+    const rawEmail = data.userEmail ?? data.email ?? data?.user?.email ?? "";
+    const email = normalizeEmail(rawEmail);
+    devLog(`[join_workspace] ${workspaceName} | creating=${isCreating}`);
     const joinThrottle = allowSensitiveAttempt(scopeForEmail("join_workspace", email || workspaceName));
     if (!joinThrottle.allowed) {
       return socket.emit("error_msg", "Too many workspace attempts. Please wait a few minutes and try again.");
@@ -1195,7 +1291,7 @@ io.on("connection", (socket) => {
         workspaces[workspaceName] = {
           password: await hashSecret(password),
           projectName: projectName || workspaceName,
-          creatorEmail: email.toLowerCase().trim(),
+          creatorEmail: email,
           tasks:       [],
           history:     [],
           members:     [],
@@ -1206,9 +1302,12 @@ io.on("connection", (socket) => {
       }
     }
 
-    const ws   = workspaces[workspaceName];
-    const normalizedUserEmail = email.trim().toLowerCase();
-    const storedCreatorEmail = (ws.creatorEmail || "").trim().toLowerCase();
+    const ws = workspaces[workspaceName];
+    if (!ws) {
+      return socket.emit("error_msg", "Workspace could not be initialized.");
+    }
+    const normalizedUserEmail = email;
+    const storedCreatorEmail = normalizeEmail(ws.creatorEmail);
     
     console.log(`DEBUG: Role Assignment Check`);
     console.log(`  User Email (normalized): "${normalizedUserEmail}"`);
@@ -1234,9 +1333,9 @@ io.on("connection", (socket) => {
     ws.sockets.set(socket.id, { name: userName, role, email });
     socket.join(workspaceName);
     console.log(`[join_workspace] Added ${userName} to workspace. Total sockets in workspace: ${ws.sockets.size}`);
-     const memberKey = email.toLowerCase().trim();
+    const memberKey = email;
     const existingMemberIndex = ws.members.findIndex(
-      m => m.email && m.email.toLowerCase().trim() === memberKey
+      m => normalizeEmail(m?.email) === memberKey
     );
     
     if (existingMemberIndex !== -1) {
@@ -1266,7 +1365,7 @@ io.on("connection", (socket) => {
 
     const userRec = await ensureUserLoaded(email);
     ensureProValidity(email);
-    const refreshedUser = users[email.toLowerCase().trim()];
+    const refreshedUser = users[email];
     const { count, resetAt } = getUserTaskData(email);
 
     socket.emit("load_workspace", {
@@ -1286,15 +1385,16 @@ io.on("connection", (socket) => {
     socket.to(workspaceName).emit("history_update", ws.history);
 
     console.log(`[join] ${userName} (${email}) → ${workspaceName} (${role})`);
-  });
+  }));
 
-  socket.on("rejoin_workspace", async (data) => {
+  socket.on("rejoin_workspace", withSocketGuard(socket, "rejoin_workspace", async (data = {}) => {
     console.log(`\n[rejoin_workspace] ════════════════════════════════════════════`);
     console.log(`DEBUG: Full payload received:`, JSON.stringify(data, null, 2));
     
-    const { workspaceName, userName } = data;
-     const rawEmail = data.userEmail || data.email || (data.user && data.user.email) || "";
-    const email = rawEmail.trim().toLowerCase();
+    const workspaceName = normalizeText(data.workspaceName);
+    const userName = normalizeText(data.userName);
+    const rawEmail = data.userEmail ?? data.email ?? data?.user?.email ?? "";
+    const email = normalizeEmail(rawEmail);
     const rejoinThrottle = allowSensitiveAttempt(scopeForEmail("rejoin_workspace", email || workspaceName));
     if (!rejoinThrottle.allowed) {
       return socket.emit("error_msg", "Too many reconnect attempts. Please wait a few minutes and try again.");
@@ -1324,8 +1424,8 @@ io.on("connection", (socket) => {
       console.error(`[rejoin_workspace] Workspace "${workspaceName}" not found!`);
       return socket.emit("error_msg", `Workspace "${workspaceName}" not found.`);
     }
-     const normalizedUserEmail = email.trim().toLowerCase();
-    const storedCreatorEmail = (ws.creatorEmail || "").trim().toLowerCase();
+    const normalizedUserEmail = email;
+    const storedCreatorEmail = normalizeEmail(ws.creatorEmail);
     
     console.log(`DEBUG: Role Assignment Check`);
     console.log(`  User Email (normalized): "${normalizedUserEmail}"`);
@@ -1342,12 +1442,12 @@ io.on("connection", (socket) => {
         console.warn(`⚠️  CRITICAL: storedCreatorEmail is EMPTY! Admin role cannot be restored on rejoin.`);
       }
     }
-     ws.sockets.set(socket.id, { name: userName, role, email });
+    ws.sockets.set(socket.id, { name: userName, role, email });
     socket.join(workspaceName);
     console.log(`[rejoin_workspace] Rejoined ${userName} to workspace. Total sockets: ${ws.sockets.size}`);
-     const memberKey = email.toLowerCase().trim();
+    const memberKey = email;
     const existingMember = ws.members.find(
-      m => m.email && m.email.toLowerCase().trim() === memberKey
+      m => normalizeEmail(m?.email) === memberKey
     );
     if (existingMember && existingMember.name !== userName) {
       console.log(`[rejoin_workspace] Updated member name: "${existingMember.name}" → "${userName}"`);
@@ -1356,7 +1456,7 @@ io.on("connection", (socket) => {
     }
      const userRec = await ensureUserLoaded(email);
     ensureProValidity(email);
-    const refreshedUser = users[email.toLowerCase().trim()];
+    const refreshedUser = users[email];
     const { count, resetAt } = getUserTaskData(email);
 
     console.log(`[rejoin_workspace] Emitting load_workspace with taskCount=${count}, resetAt=${resetAt}, isPro=${userRec?.isPro || false}`);
@@ -1376,9 +1476,10 @@ io.on("connection", (socket) => {
     broadcastUsers(workspaceName);
     broadcastMembers(workspaceName);
     socket.to(workspaceName).emit("history_update", ws.history);
-  });
-   socket.on("update_tasks", async ({ workspaceName, updatedTasks, actionMeta, newTaskId }) => {
-    const ws = workspaces[workspaceName];
+  }));
+  socket.on("update_tasks", async ({ workspaceName, updatedTasks, actionMeta, newTaskId } = {}) => {
+    const safeWorkspaceName = normalizeText(workspaceName);
+    const ws = workspaces[safeWorkspaceName];
     if (!ws) return;
 
     const user = ws.sockets.get(socket.id);
@@ -1421,18 +1522,18 @@ io.on("connection", (socket) => {
         timestamp: new Date().toISOString(),
       });
     }
-     await saveRoomToDB(workspaceName);
+     await saveRoomToDB(safeWorkspaceName);
 
-    socket.to(workspaceName).emit("receive_update", {
+    socket.to(safeWorkspaceName).emit("receive_update", {
       tasks:   ws.tasks,
       history: ws.history,
     });
 
     socket.emit("history_update", ws.history);
   });
-   socket.on("check_task_limit", async ({ email }) => {
+  socket.on("check_task_limit", async ({ email } = {}) => {
     if (!email) return;
-    const key = email.toLowerCase().trim();
+    const key = normalizeEmail(email);
     let ws_user = users[key];
      if (!ws_user) {
       console.log(`[check_task_limit] User ${key} not in memory, attempting to load...`);
@@ -1463,20 +1564,22 @@ io.on("connection", (socket) => {
       canAdd: count < limit,
     });
   });
-   socket.on("typing_start", ({ workspaceName, context }) => {
-    const ws = workspaces[workspaceName];
+   socket.on("typing_start", ({ workspaceName, context } = {}) => {
+    const safeWorkspaceName = normalizeText(workspaceName);
+    const ws = workspaces[safeWorkspaceName];
     if (!ws) return;
     const user = ws.sockets.get(socket.id);
     if (!user) return;
-    socket.to(workspaceName).emit("typing_update", { name: user.name, role: user.role, context });
+    socket.to(safeWorkspaceName).emit("typing_update", { name: user.name, role: user.role, context });
   });
 
-  socket.on("typing_stop", ({ workspaceName }) => {
-    const ws = workspaces[workspaceName];
+  socket.on("typing_stop", ({ workspaceName } = {}) => {
+    const safeWorkspaceName = normalizeText(workspaceName);
+    const ws = workspaces[safeWorkspaceName];
     if (!ws) return;
     const user = ws.sockets.get(socket.id);
     if (!user) return;
-    socket.to(workspaceName).emit("typing_clear", { name: user.name });
+    socket.to(safeWorkspaceName).emit("typing_clear", { name: user.name });
   });
    socket.on("disconnect", () => {
     console.log(`[disconnect] ${socket.id}`);
@@ -1504,14 +1607,16 @@ io.on("connection", (socket) => {
       }
     }
   });
-   socket.on("delete_workspace", async ({ workspaceName, email }) => {
-    console.log(`[delete_workspace] User: ${email} | Workspace: ${workspaceName}`);
-    const deleteThrottle = allowSensitiveAttempt(scopeForEmail("delete_workspace", email || workspaceName));
+   socket.on("delete_workspace", async ({ workspaceName, email } = {}) => {
+    const safeWorkspaceName = normalizeText(workspaceName);
+    const safeEmail = normalizeEmail(email);
+    console.log(`[delete_workspace] User: ${safeEmail} | Workspace: ${safeWorkspaceName}`);
+    const deleteThrottle = allowSensitiveAttempt(scopeForEmail("delete_workspace", safeEmail || safeWorkspaceName));
     if (!deleteThrottle.allowed) {
       return socket.emit("error_msg", "Too many delete attempts. Please wait a few minutes and try again.");
     }
     
-    const ws = workspaces[workspaceName];
+    const ws = workspaces[safeWorkspaceName];
     if (!ws) {
       return socket.emit("error_msg", "Workspace not found.");
     }
@@ -1520,36 +1625,37 @@ io.on("connection", (socket) => {
     if (!user || user.role !== "admin") {
       return socket.emit("error_msg", "Only admins can delete workspaces.");
     }
-     delete workspaces[workspaceName];
-    console.log(`[delete_workspace] ✓ Deleted ${workspaceName} from memory`);
+     delete workspaces[safeWorkspaceName];
+    console.log(`[delete_workspace] ✓ Deleted ${safeWorkspaceName} from memory`);
      if (mongoConnected) {
       try {
         const collection = mongoose.connection.db.collection("workspaces");
-        await collection.deleteOne({ workspaceName });
-        console.log(`[delete_workspace] ✓ Deleted ${workspaceName} from MongoDB`);
+        await collection.deleteOne({ workspaceName: safeWorkspaceName });
+        console.log(`[delete_workspace] ✓ Deleted ${safeWorkspaceName} from MongoDB`);
       } catch (err) {
         console.error(`[delete_workspace] Error deleting from DB:`, err.message);
       }
     }
-     io.to(workspaceName).emit("error_msg", `Workspace "${workspaceName}" has been deleted by admin.`);
-    socket.leave(workspaceName);
+     io.to(safeWorkspaceName).emit("error_msg", `Workspace "${safeWorkspaceName}" has been deleted by admin.`);
+    socket.leave(safeWorkspaceName);
     
     socket.emit("workspace_deleted_success");
   });
-   socket.on("clear_history", async ({ workspaceName }) => {
-    const clearThrottle = allowSensitiveAttempt(scopeForEmail("clear_history", workspaceName));
+   socket.on("clear_history", async ({ workspaceName } = {}) => {
+    const safeWorkspaceName = normalizeText(workspaceName);
+    const clearThrottle = allowSensitiveAttempt(scopeForEmail("clear_history", safeWorkspaceName));
     if (!clearThrottle.allowed) {
       return socket.emit("permission_denied", "Too many history actions. Please wait a few minutes and try again.");
     }
-    const ws = workspaces[workspaceName];
+    const ws = workspaces[safeWorkspaceName];
     if (!ws) return;
     const user = ws.sockets.get(socket.id);
     if (!user || user.role !== "admin") {
       return socket.emit("permission_denied", "Only admins can clear history.");
     }
     ws.history = [];
-    await saveRoomToDB(workspaceName);
-    io.to(workspaceName).emit("history_update", ws.history);
+    await saveRoomToDB(safeWorkspaceName);
+    io.to(safeWorkspaceName).emit("history_update", ws.history);
     socket.emit("history_update", ws.history); // ← ENSURE sender gets it too
     socket.emit("history_cleared");
   });
@@ -1572,4 +1678,16 @@ async function startServer() {
 startServer().catch(err => {
   console.error("[startServer] Fatal error:", err.message);
   process.exit(1);
+});
+
+app.use((err, req, res, next) => {
+  const origin = req?.headers?.origin;
+  if (!origin || isOriginAllowed(origin, ALLOWED_ORIGINS)) {
+    applyCorsHeaders(res, origin);
+  }
+  console.error("[express] Unhandled error:", err);
+  if (res.headersSent) {
+    return next(err);
+  }
+  return res.status(err?.status || 500).json({ error: err?.message || "Internal server error" });
 });
