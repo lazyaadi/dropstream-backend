@@ -77,6 +77,7 @@ app.use(cors({ origin: corsOrigin, credentials: true }));
 
 const server = http.createServer(app);
 const io = new Server(server, {
+  maxHttpBufferSize: 1e7,
   cors: {
     origin: corsOrigin,
     methods: ["GET", "POST", "OPTIONS"],
@@ -1046,8 +1047,48 @@ function broadcastMembers(workspaceName) {
   io.to(workspaceName).emit("members_update", ws.members);
 }
 
+function formatHistoryAction(action, taskTitle = "", targetStatus = "") {
+  const normalizedAction = normalizeText(action).toLowerCase();
+  const safeTaskTitle = normalizeText(taskTitle);
+  const safeTargetStatus = normalizeText(targetStatus);
+
+  if (normalizedAction === "joined the workspace" || normalizedAction === "join_workspace") {
+    return "joined the workspace";
+  }
+
+  if (normalizedAction === "left the workspace" || normalizedAction === "leave_workspace") {
+    return "left the workspace";
+  }
+
+  if (normalizedAction === "create_task" || normalizedAction === "added task" || normalizedAction === "task_created") {
+    return safeTaskTitle ? `created task '${safeTaskTitle}'` : "created a task";
+  }
+
+  if (normalizedAction === "move_task" || normalizedAction === "moved task" || normalizedAction === "task_moved") {
+    if (safeTaskTitle && safeTargetStatus) return `moved task '${safeTaskTitle}' to ${safeTargetStatus}`;
+    if (safeTaskTitle) return `moved task '${safeTaskTitle}'`;
+    return "moved a task";
+  }
+
+  if (normalizedAction === "delete_task" || normalizedAction === "deleted task" || normalizedAction === "task_deleted") {
+    return safeTaskTitle ? `deleted task '${safeTaskTitle}'` : "deleted a task";
+  }
+
+  return normalizeText(action) || "updated the workspace";
+}
+
+function formatHistoryEntry(entry = {}) {
+  return {
+    action: formatHistoryAction(entry.action, entry.taskTitle, entry.targetStatus),
+    userName: entry.userName,
+    userRole: entry.userRole,
+    taskTitle: entry.taskTitle || null,
+    timestamp: entry.timestamp || new Date().toISOString(),
+  };
+}
+
 function pushHistory(ws, entry) {
-  ws.history.unshift(entry);
+  ws.history.unshift(formatHistoryEntry(entry));
 }
 
 
@@ -1487,7 +1528,7 @@ io.on("connection", (socket) => {
     broadcastMembers(workspaceName);
     socket.to(workspaceName).emit("history_update", ws.history);
   }));
-  socket.on("update_tasks", async ({ workspaceName, updatedTasks, actionMeta, newTaskId } = {}) => {
+  socket.on("update_tasks", withSocketGuard(socket, "update_tasks", async ({ workspaceName, updatedTasks, actionMeta, newTaskId } = {}) => {
     const safeWorkspaceName = normalizeText(workspaceName);
     const ws = workspaces[safeWorkspaceName];
     if (!ws) return;
@@ -1527,6 +1568,7 @@ io.on("connection", (socket) => {
       pushHistory(ws, {
         action:    actionMeta.action,
         taskTitle: actionMeta.taskTitle || null,
+        targetStatus: actionMeta.targetStatus || actionMeta.status || null,
         userName:  user.name,
         userRole:  user.role,
         timestamp: new Date().toISOString(),
@@ -1540,7 +1582,7 @@ io.on("connection", (socket) => {
     });
 
     socket.emit("history_update", ws.history);
-  });
+  }));
   socket.on("check_task_limit", async ({ email } = {}) => {
     if (!email) return;
     const key = normalizeEmail(email);
