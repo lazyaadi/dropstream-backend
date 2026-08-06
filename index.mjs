@@ -1340,13 +1340,12 @@ io.on("connection", (socket) => {
 
   socket.on("check_pro_status", ({ email, proPin } = {}) => {
     const key = normalizeEmail(email);
-    const user = users[key];
-    if (email) ensureProValidity(email);
-    if (user && user.isPro) {
-      socket.emit("pro_status", { isPro: true });
-    } else {
+    getHydratedUserProfile(key).then((profile) => {
+      socket.emit("pro_status", { isPro: !!profile?.isPro, proExpiresAt: profile?.proExpiresAt || null });
+    }).catch((err) => {
+      console.error("[check_pro_status] Failed to hydrate profile:", err.message);
       socket.emit("pro_status", { isPro: false });
-    }
+    });
   });
 
   socket.on("set_user_pro", async ({ email, proPin } = {}) => {
@@ -1383,12 +1382,21 @@ io.on("connection", (socket) => {
     }
     markUserPro(email, String(proPin).trim());
     const { count, resetAt } = getUserTaskData(email);
-    const userRec = users[key];
-    socket.emit("pro_activated", {
-      taskCount: count,
-      resetAt,
-      isPro: true,
-      proExpiresAt: userRec?.proExpiresAt || null,
+    getHydratedUserProfile(email).then((profile) => {
+      socket.emit("pro_activated", {
+        taskCount: count,
+        resetAt,
+        isPro: !!profile?.isPro,
+        proExpiresAt: profile?.proExpiresAt || null,
+      });
+    }).catch((err) => {
+      console.error("[set_user_pro] Failed to hydrate profile:", err.message);
+      socket.emit("pro_activated", {
+        taskCount: count,
+        resetAt,
+        isPro: true,
+        proExpiresAt: users[key]?.proExpiresAt || null,
+      });
     });
   });
 
@@ -1538,9 +1546,7 @@ io.on("connection", (socket) => {
 
     await saveRoomToDB(workspaceName);
 
-    const userRec = await ensureUserLoaded(email);
-    ensureProValidity(email);
-    const refreshedUser = users[email];
+    const refreshedUser = await getHydratedUserProfile(email);
     const { count, resetAt } = getUserTaskData(email);
 
     socket.emit("load_workspace", {
@@ -1629,12 +1635,10 @@ io.on("connection", (socket) => {
       existingMember.name = userName;
        await saveRoomToDB(workspaceName);
     }
-     const userRec = await ensureUserLoaded(email);
-    ensureProValidity(email);
-    const refreshedUser = users[email];
+    const refreshedUser = await getHydratedUserProfile(email);
     const { count, resetAt } = getUserTaskData(email);
 
-    console.log(`[rejoin_workspace] Emitting load_workspace with taskCount=${count}, resetAt=${resetAt}, isPro=${userRec?.isPro || false}`);
+    console.log(`[rejoin_workspace] Emitting load_workspace with taskCount=${count}, resetAt=${resetAt}, isPro=${refreshedUser?.isPro || false}`);
     socket.emit("load_workspace", {
       tasks:       ws.tasks,
       projectName: ws.projectName,
