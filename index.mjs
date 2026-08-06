@@ -681,16 +681,27 @@ function resolveActiveProState(user) {
     return { isPro: false, proExpiresAt: null };
   }
 
-  if (user.isPro && user.proExpiresAt && new Date() > new Date(user.proExpiresAt)) {
-    user.isPro = false;
-    user.proPin = null;
-    user.proActivatedAt = null;
-    user.proExpiresAt = null;
+  const isProFlag = !!user.isPro;
+  const proExpiresAt = user.proExpiresAt || null;
+
+  if (!isProFlag) {
+    return { isPro: false, proExpiresAt: null };
+  }
+
+  if (proExpiresAt) {
+    const expTime = new Date(proExpiresAt).getTime();
+    if (!Number.isNaN(expTime) && Date.now() > expTime) {
+      user.isPro = false;
+      user.proPin = null;
+      user.proActivatedAt = null;
+      user.proExpiresAt = null;
+      return { isPro: false, proExpiresAt: null };
+    }
   }
 
   return {
-    isPro: user.isPro === true,
-    proExpiresAt: user.proExpiresAt || null,
+    isPro: true,
+    proExpiresAt,
   };
 }
  const workspaces  = {};
