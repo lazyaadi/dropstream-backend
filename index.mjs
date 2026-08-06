@@ -1123,44 +1123,53 @@ async function deactivateUserPro(email) {
   return true;
 }
 
+function getValidOnlineMembers(room) {
+  const seenEmails = new Set();
+  const validList = [];
+
+  for (const [, socketData] of room?.sockets || []) {
+    const email = socketData?.email || socketData?.user?.email;
+    if (!email || typeof email !== "string" || !email.includes("@")) continue;
+    const normalizedEmail = email.toLowerCase().trim();
+    if (!normalizedEmail || seenEmails.has(normalizedEmail)) continue;
+
+    seenEmails.add(normalizedEmail);
+    validList.push({
+      email: normalizedEmail,
+      name: socketData?.name || socketData?.user?.name || normalizedEmail.split("@")[0],
+      role: socketData?.role || "member",
+      isOnline: true,
+    });
+  }
+
+  return validList;
+}
+
+function getValidWorkspaceMembers(room) {
+  const seenEmails = new Set();
+  const validList = [];
+
+  for (const member of room?.members || []) {
+    const email = member?.email;
+    if (!email || typeof email !== "string" || !email.includes("@")) continue;
+    const normalizedEmail = email.toLowerCase().trim();
+    if (!normalizedEmail || seenEmails.has(normalizedEmail)) continue;
+
+    seenEmails.add(normalizedEmail);
+    validList.push({
+      ...member,
+      email: normalizedEmail,
+    });
+  }
+
+  return validList;
+}
+
 async function broadcastUsers(workspaceName) {
   const ws = workspaces[workspaceName];
   if (!ws) return;
 
-  const memberEmailByName = new Map();
-  ws.members.forEach(m => {
-    if (m?.name && m?.email) memberEmailByName.set(m.name, m.email);
-  });
-
-  const uniqueMap = new Map();
-  for (const u of ws.sockets.values()) {
-    const filledEmail = u.email || memberEmailByName.get(u.name);
-    const key = (filledEmail || u.name || "").toLowerCase();
-    if (!key) continue;
-
-    const existing = uniqueMap.get(key);
-    if (!existing) {
-      uniqueMap.set(key, { name: u.name, email: filledEmail || null, role: u.role });
-      continue;
-    }
-
-    if (!existing.email && filledEmail) {
-      uniqueMap.set(key, { name: u.name, email: filledEmail, role: u.role });
-    }
-  }
-
-
-  for (const [key, val] of uniqueMap.entries()) {
-    if (!val.email && val.name) {
-      const emailFromMember = memberEmailByName.get(val.name);
-      if (emailFromMember) {
-        uniqueMap.delete(key);
-        uniqueMap.set(emailFromMember.toLowerCase(), { name: val.name, email: emailFromMember, role: val.role });
-      }
-    }
-  }
-
-  const online = [...uniqueMap.values()];
+  const online = getValidOnlineMembers(ws);
   console.log(`[broadcastUsers] ${workspaceName}: ${online.length} users online -`, online.map(u => u.name).join(", "));
 
   const proByEmail = new Map();
@@ -1198,7 +1207,7 @@ async function broadcastUsers(workspaceName) {
 function broadcastMembers(workspaceName) {
   const ws = workspaces[workspaceName];
   if (!ws) return;
-  io.to(workspaceName).emit("members_update", ws.members);
+  io.to(workspaceName).emit("members_update", getValidWorkspaceMembers(ws));
 }
 
 function formatHistoryAction(action, taskTitle = "", targetStatus = "") {
@@ -1453,10 +1462,11 @@ io.on("connection", (socket) => {
     const workspaceName = normalizeText(data.workspaceName);
     const password = normalizeText(data.password);
     const projectName = normalizeText(data.projectName);
-    const userName = normalizeText(data.userName);
+    const explicitName = normalizeText(data.name || data.userName);
     const isCreating = !!data.isCreating;
     const rawEmail = data.userEmail ?? data.email ?? data?.user?.email ?? "";
     const email = normalizeEmail(rawEmail);
+    const userName = explicitName || (email.includes("@") ? email.split("@")[0] : normalizeText(data.userName));
     devLog(`[join_workspace] ${workspaceName} | creating=${isCreating}`);
     const joinThrottle = allowSensitiveAttempt(scopeForEmail("join_workspace", email || workspaceName));
     if (!joinThrottle.allowed) {
@@ -1550,7 +1560,7 @@ io.on("connection", (socket) => {
     ws.isPro = !!(ws.isPro || joinedUserIsPro);
     ws.proExpiresAt = joinedUserProExpiresAt || ws.proExpiresAt || null;
 
-    ws.sockets.set(socket.id, { name: userName, role, email });
+    ws.sockets.set(socket.id, { name: userName, displayName: userName, role, email });
     socket.join(workspaceName);
     console.log(`[join_workspace] Added ${userName} to workspace. Total sockets in workspace: ${ws.sockets.size}`);
     const memberKey = email;
@@ -1570,7 +1580,7 @@ io.on("connection", (socket) => {
       }
     } else {
      
-      ws.members.push({ name: userName, role, email: memberKey, joinedAt: new Date().toISOString() });
+      ws.members.push({ name: userName, displayName: userName, role, email: memberKey, joinedAt: new Date().toISOString() });
     }
 
     pushHistory(ws, {
@@ -1620,9 +1630,10 @@ io.on("connection", (socket) => {
     console.log(`DEBUG: Full payload received:`, JSON.stringify(data, null, 2));
     
     const workspaceName = normalizeText(data.workspaceName);
-    const userName = normalizeText(data.userName);
+    const explicitName = normalizeText(data.name || data.userName);
     const rawEmail = data.userEmail ?? data.email ?? data?.user?.email ?? "";
     const email = normalizeEmail(rawEmail);
+    const userName = explicitName || (email.includes("@") ? email.split("@")[0] : normalizeText(data.userName));
     const rejoinThrottle = allowSensitiveAttempt(scopeForEmail("rejoin_workspace", email || workspaceName));
     if (!rejoinThrottle.allowed) {
       return socket.emit("error_msg", "Too many reconnect attempts. Please wait a few minutes and try again.");
@@ -1670,7 +1681,7 @@ io.on("connection", (socket) => {
         console.warn(`⚠️  CRITICAL: storedCreatorEmail is EMPTY! Admin role cannot be restored on rejoin.`);
       }
     }
-    ws.sockets.set(socket.id, { name: userName, role, email });
+    ws.sockets.set(socket.id, { name: userName, displayName: userName, role, email });
     socket.join(workspaceName);
     console.log(`[rejoin_workspace] Rejoined ${userName} to workspace. Total sockets: ${ws.sockets.size}`);
     const memberKey = email;
@@ -1680,6 +1691,7 @@ io.on("connection", (socket) => {
     if (existingMember && existingMember.name !== userName) {
       console.log(`[rejoin_workspace] Updated member name: "${existingMember.name}" → "${userName}"`);
       existingMember.name = userName;
+      existingMember.displayName = userName;
        await saveRoomToDB(workspaceName);
     }
     const joinedProfile = await getHydratedUserProfile(email);
