@@ -57,7 +57,7 @@ const applyCorsHeaders = (headers, origin) => {
   const resolvedOrigin = origin || "*";
   setHeaderValue(headers, "Access-Control-Allow-Origin", resolvedOrigin);
   setHeaderValue(headers, "Access-Control-Allow-Credentials", "true");
-  setHeaderValue(headers, "Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, Origin");
+  setHeaderValue(headers, "Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, Accept, Origin, X-Contact-Request-ID");
   setHeaderValue(headers, "Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS");
   setHeaderValue(headers, "Vary", "Origin");
 };
