@@ -353,19 +353,10 @@ app.post("/api/contact", async (req, res) => {
     return res.status(500).json({ error: "Failed to send notification." });
   }
 });
- const MONGO_URI = process.env.MONGO_URI;
+const MONGO_URI = process.env.MONGO_URI;
 if (IS_DEV) devLog("[startup] MONGO_URI:", MONGO_URI ? "configured" : "missing");
 let mongoConnected = false;
 
-async function connectDB() {
-  if (!MONGO_URI) {
-    console.warn("[connectDB] MONGO_URI not configured, running in memory-only mode");
-    return;
-  }
-  
-  try {
-    console.log("[connectDB] Attempting to connect to MongoDB...");
-  
 app.get(["/api/auth/me", "/api/user/profile"], async (req, res) => {
   const email = String(req.query.email || req.headers["x-user-email"] || "").trim();
   if (!email) {
@@ -383,6 +374,15 @@ app.get(["/api/auth/me", "/api/user/profile"], async (req, res) => {
     return res.status(500).json({ error: "Failed to load profile." });
   }
 });
+
+async function connectDB() {
+  if (!MONGO_URI) {
+    console.warn("[connectDB] MONGO_URI not configured, running in memory-only mode");
+    return;
+  }
+  
+  try {
+    console.log("[connectDB] Attempting to connect to MongoDB...");
     const connectionPromise = mongoose.connect(MONGO_URI, {
       serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 5000,
@@ -585,15 +585,67 @@ async function getHydratedUserProfile(email) {
   const key = normalizeEmail(email);
   if (!key) return null;
 
-  const user = await ensureUserLoaded(key);
-  if (!user) return null;
+  if (!mongoConnected) {
+    const cachedUser = users[key];
+    if (!cachedUser) return null;
+    resolveActiveProState(cachedUser);
+    return {
+      email: key,
+      name: cachedUser.name || "",
+      taskCount: cachedUser.taskCount || 0,
+      resetAt: cachedUser.resetAt || null,
+      isPro: cachedUser.isPro || false,
+      proActivatedAt: cachedUser.proActivatedAt || null,
+      proExpiresAt: cachedUser.proExpiresAt || null,
+      authProvider: cachedUser.authProvider || null,
+      googleSub: cachedUser.googleSub || null,
+      googlePicture: cachedUser.googlePicture || null,
+    };
+  }
 
-  ensureProValidity(key);
+  const collection = mongoose.connection.db.collection("users");
+  const doc = await collection.findOne({ email: key });
+  if (!doc) return null;
+
+  let isPro = doc.isPro === true;
+  let proExpiresAt = doc.proExpiresAt || null;
+  const proExpired = isPro && proExpiresAt && new Date(proExpiresAt).getTime() <= Date.now();
+  if (proExpired) {
+    isPro = false;
+    proExpiresAt = null;
+    await collection.updateOne(
+      { email: key },
+      {
+        $set: {
+          isPro: false,
+          proPin: null,
+          proActivatedAt: null,
+          proExpiresAt: null,
+          updatedAt: new Date().toISOString(),
+        },
+      }
+    );
+  }
+
+  users[key] = {
+    name: doc.name || "",
+    passwordHash: doc.passwordHash,
+    taskCount: doc.taskCount || 0,
+    resetAt: doc.resetAt || null,
+    taskIds: doc.taskIds || [],
+    isPro,
+    proPin: doc.proPin,
+    proActivatedAt: doc.proActivatedAt || null,
+    proExpiresAt,
+    authProvider: doc.authProvider || null,
+    googleSub: doc.googleSub || null,
+    googlePicture: doc.googlePicture || null,
+  };
 
   const hydrated = users[key];
   return {
     email: key,
-    name: hydrated?.name || user.name || "",
+    name: hydrated?.name || "",
     taskCount: hydrated?.taskCount || 0,
     resetAt: hydrated?.resetAt || null,
     isPro: hydrated?.isPro || false,
