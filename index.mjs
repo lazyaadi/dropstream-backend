@@ -368,6 +368,11 @@ app.get(["/api/auth/me", "/api/user/profile"], async (req, res) => {
     if (!profile) {
       return res.status(404).json({ error: "User not found." });
     }
+    console.log('[DEBUG API /user/profile RESPONSE]', {
+      requestedEmail: req.query.email,
+      returnedIsPro: profile?.isPro,
+      returnedExpiresAt: profile?.proExpiresAt,
+    });
     return res.json({ ok: true, profile });
   } catch (err) {
     console.error("[profile] Failed to load profile:", err.message);
@@ -473,6 +478,11 @@ async function loadRoomFromDB(workspaceName) {
     const doc = await collection.findOne({ workspaceName: key });
     
     if (doc) {
+      console.log('[DEBUG DB LOAD]', {
+        roomKey: key,
+        dbIsPro: doc?.isPro,
+        dbProExpiresAt: doc?.proExpiresAt,
+      });
       console.log(`[loadRoomFromDB] ✓ Loaded ${key} from MongoDB`);
       return {
         password: doc.password,
@@ -560,6 +570,11 @@ async function loadUserFromDB(email) {
     const doc = await collection.findOne({ email: key });
     
     if (doc) {
+      console.log('[DEBUG DB LOAD]', {
+        roomKey: key,
+        dbIsPro: doc?.isPro,
+        dbProExpiresAt: doc?.proExpiresAt,
+      });
       console.log(`[loadUserFromDB] ✓ Loaded user ${key} from MongoDB (taskCount: ${doc.taskCount})`);
       return {
         name: doc.name,
@@ -1557,6 +1572,14 @@ io.on("connection", (socket) => {
 
     await saveRoomToDB(workspaceName);
 
+    console.log('[DEBUG SOCKET EMIT load_workspace]', {
+      socketId: socket.id,
+      userEmail: joinedProfile?.email || email,
+      userIsPro: joinedUserIsPro,
+      roomIsPro: ws?.isPro,
+      mergedPayloadIsPro: joinedUserIsPro || ws?.isPro || false,
+    });
+
     const refreshedUser = joinedProfile;
     const resolvedIsPro = !!(ws.isPro || joinedUserIsPro);
     const resolvedProExpiresAt = joinedUserProExpiresAt || ws.proExpiresAt || null;
@@ -1653,6 +1676,14 @@ io.on("connection", (socket) => {
     ws.isPro = !!(ws.isPro || joinedUserIsPro);
     ws.proExpiresAt = joinedUserProExpiresAt || ws.proExpiresAt || null;
     await saveRoomToDB(workspaceName);
+
+    console.log('[DEBUG SOCKET EMIT load_workspace]', {
+      socketId: socket.id,
+      userEmail: joinedProfile?.email || email,
+      userIsPro: joinedUserIsPro,
+      roomIsPro: ws?.isPro,
+      mergedPayloadIsPro: joinedUserIsPro || ws?.isPro || false,
+    });
 
     const refreshedUser = joinedProfile;
     const resolvedIsPro = !!(ws.isPro || joinedUserIsPro);
