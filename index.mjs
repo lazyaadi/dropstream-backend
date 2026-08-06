@@ -439,6 +439,8 @@ async function saveRoomToDB(workspaceName) {
           password: ws.password,
           projectName: ws.projectName,
           creatorEmail: creatorEmailToSave,
+          isPro: ws.isPro || false,
+          proExpiresAt: ws.proExpiresAt || null,
           tasks: ws.tasks || [],
           history: ws.history || [],
           members: ws.members || [],
@@ -476,6 +478,8 @@ async function loadRoomFromDB(workspaceName) {
         password: doc.password,
         projectName: doc.projectName,
         creatorEmail: doc.creatorEmail,
+        isPro: doc.isPro || false,
+        proExpiresAt: doc.proExpiresAt || null,
         tasks: doc.tasks || [],
         history: doc.history || [],
         members: doc.members || [],
@@ -1475,6 +1479,8 @@ io.on("connection", (socket) => {
           password: await hashSecret(password),
           projectName: projectName || workspaceName,
           creatorEmail: email,
+          isPro: false,
+          proExpiresAt: null,
           tasks:       [],
           history:     [],
           members:     [],
@@ -1513,6 +1519,11 @@ io.on("connection", (socket) => {
       }
     }
 
+    const joinedProfile = await getHydratedUserProfile(email);
+    const { isPro: joinedUserIsPro, proExpiresAt: joinedUserProExpiresAt } = resolveActiveProState(joinedProfile ? { ...joinedProfile } : null);
+    ws.isPro = !!(ws.isPro || joinedUserIsPro);
+    ws.proExpiresAt = joinedUserProExpiresAt || ws.proExpiresAt || null;
+
     ws.sockets.set(socket.id, { name: userName, role, email });
     socket.join(workspaceName);
     console.log(`[join_workspace] Added ${userName} to workspace. Total sockets in workspace: ${ws.sockets.size}`);
@@ -1546,7 +1557,9 @@ io.on("connection", (socket) => {
 
     await saveRoomToDB(workspaceName);
 
-    const refreshedUser = await getHydratedUserProfile(email);
+    const refreshedUser = joinedProfile;
+    const resolvedIsPro = !!(ws.isPro || joinedUserIsPro);
+    const resolvedProExpiresAt = joinedUserProExpiresAt || ws.proExpiresAt || null;
     const { count, resetAt } = getUserTaskData(email);
 
     socket.emit("load_workspace", {
@@ -1557,8 +1570,8 @@ io.on("connection", (socket) => {
       members:     ws.members,
       taskCount:   count,
       resetAt,
-      isPro:       refreshedUser?.isPro || false,
-      proExpiresAt: refreshedUser?.proExpiresAt || null,
+      isPro:       resolvedIsPro,
+      proExpiresAt: resolvedProExpiresAt,
     });
 
     broadcastUsers(workspaceName);
@@ -1635,10 +1648,18 @@ io.on("connection", (socket) => {
       existingMember.name = userName;
        await saveRoomToDB(workspaceName);
     }
-    const refreshedUser = await getHydratedUserProfile(email);
+    const joinedProfile = await getHydratedUserProfile(email);
+    const { isPro: joinedUserIsPro, proExpiresAt: joinedUserProExpiresAt } = resolveActiveProState(joinedProfile ? { ...joinedProfile } : null);
+    ws.isPro = !!(ws.isPro || joinedUserIsPro);
+    ws.proExpiresAt = joinedUserProExpiresAt || ws.proExpiresAt || null;
+    await saveRoomToDB(workspaceName);
+
+    const refreshedUser = joinedProfile;
+    const resolvedIsPro = !!(ws.isPro || joinedUserIsPro);
+    const resolvedProExpiresAt = joinedUserProExpiresAt || ws.proExpiresAt || null;
     const { count, resetAt } = getUserTaskData(email);
 
-    console.log(`[rejoin_workspace] Emitting load_workspace with taskCount=${count}, resetAt=${resetAt}, isPro=${refreshedUser?.isPro || false}`);
+    console.log(`[rejoin_workspace] Emitting load_workspace with taskCount=${count}, resetAt=${resetAt}, isPro=${resolvedIsPro}`);
     socket.emit("load_workspace", {
       tasks:       ws.tasks,
       projectName: ws.projectName,
@@ -1647,8 +1668,8 @@ io.on("connection", (socket) => {
       members:     ws.members,
       taskCount:   count,
       resetAt,
-      isPro:       refreshedUser?.isPro || false,
-      proExpiresAt: refreshedUser?.proExpiresAt || null,
+      isPro:       resolvedIsPro,
+      proExpiresAt: resolvedProExpiresAt,
     });
     console.log(`[rejoin_workspace] load_workspace emitted successfully\n`);
 
