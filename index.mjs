@@ -365,6 +365,24 @@ async function connectDB() {
   
   try {
     console.log("[connectDB] Attempting to connect to MongoDB...");
+  
+app.get(["/api/auth/me", "/api/user/profile"], async (req, res) => {
+  const email = String(req.query.email || req.headers["x-user-email"] || "").trim();
+  if (!email) {
+    return res.status(400).json({ error: "Email is required." });
+  }
+
+  try {
+    const profile = await getHydratedUserProfile(email);
+    if (!profile) {
+      return res.status(404).json({ error: "User not found." });
+    }
+    return res.json({ ok: true, profile });
+  } catch (err) {
+    console.error("[profile] Failed to load profile:", err.message);
+    return res.status(500).json({ error: "Failed to load profile." });
+  }
+});
     const connectionPromise = mongoose.connect(MONGO_URI, {
       serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 5000,
@@ -561,6 +579,48 @@ async function loadUserFromDB(email) {
     console.error(`[loadUserFromDB] Error loading ${key}:`, err.message);
     return null;
   }
+}
+
+async function getHydratedUserProfile(email) {
+  const key = normalizeEmail(email);
+  if (!key) return null;
+
+  const user = await ensureUserLoaded(key);
+  if (!user) return null;
+
+  ensureProValidity(key);
+
+  const hydrated = users[key];
+  return {
+    email: key,
+    name: hydrated?.name || user.name || "",
+    taskCount: hydrated?.taskCount || 0,
+    resetAt: hydrated?.resetAt || null,
+    isPro: hydrated?.isPro || false,
+    proActivatedAt: hydrated?.proActivatedAt || null,
+    proExpiresAt: hydrated?.proExpiresAt || null,
+    authProvider: hydrated?.authProvider || user.authProvider || null,
+    googleSub: hydrated?.googleSub || user.googleSub || null,
+    googlePicture: hydrated?.googlePicture || user.googlePicture || null,
+  };
+}
+
+function resolveActiveProState(user) {
+  if (!user) {
+    return { isPro: false, proExpiresAt: null };
+  }
+
+  if (user.isPro && user.proExpiresAt && new Date() > new Date(user.proExpiresAt)) {
+    user.isPro = false;
+    user.proPin = null;
+    user.proActivatedAt = null;
+    user.proExpiresAt = null;
+  }
+
+  return {
+    isPro: user.isPro === true,
+    proExpiresAt: user.proExpiresAt || null,
+  };
 }
  const workspaces  = {};
 const MAX_HISTORY = Infinity;
@@ -765,15 +825,26 @@ function finalizeGoogleAuth(socket, payload, source = "google") {
       userRecord.taskIds = [];
     }
     saveUserToDB(email).catch(err => console.error("[finalizeGoogleAuth] Error saving existing user:", err.message));
-    ensureProValidity(email);
     const { count, resetAt } = getUserTaskData(email);
-    socket.emit("auth_success", {
-      email: key,
-      name: userRecord.name,
-      isPro: userRecord.isPro,
-      taskCount: count,
-      resetAt,
-      proExpiresAt: userRecord.proExpiresAt || null,
+    getHydratedUserProfile(email).then((profile) => {
+      socket.emit("auth_success", {
+        email: key,
+        name: profile?.name || userRecord.name,
+        isPro: profile?.isPro || false,
+        taskCount: count,
+        resetAt,
+        proExpiresAt: profile?.proExpiresAt || null,
+      });
+    }).catch((err) => {
+      console.error("[finalizeGoogleAuth] Profile hydration failed:", err.message);
+      socket.emit("auth_success", {
+        email: key,
+        name: userRecord.name,
+        isPro: userRecord.isPro,
+        taskCount: count,
+        resetAt,
+        proExpiresAt: userRecord.proExpiresAt || null,
+      });
     });
   };
 
@@ -923,6 +994,7 @@ async function ensureUserLoaded(email) {
     proActivatedAt: dbUser.proActivatedAt || null,
     proExpiresAt: dbUser.proExpiresAt || null,
   };
+  resolveActiveProState(users[key]);
   return users[key];
 }
 
@@ -1152,16 +1224,16 @@ io.on("connection", (socket) => {
         await saveUserToDB(email);
         console.log(`[auth_user] Reset task count for ${key}`);
       }
-      ensureProValidity(email);
+      const profile = await getHydratedUserProfile(email);
       const { count, resetAt } = getUserTaskData(email);
       console.log(`[auth_user] Sending auth_success to client with taskCount=${count}`);
       return socket.emit("auth_success", {
         email: key,
-        name:  existing.name,
-        isPro: existing.isPro,
+        name:  profile?.name || existing.name,
+        isPro: profile?.isPro || false,
         taskCount: count,
         resetAt,
-        proExpiresAt: existing.proExpiresAt || null,
+        proExpiresAt: profile?.proExpiresAt || null,
       });
     } else {
        if (!name || !name.trim()) {
