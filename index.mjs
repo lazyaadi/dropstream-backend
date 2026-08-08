@@ -670,9 +670,9 @@ async function getHydratedUserProfile(email) {
     isPro: hydrated?.isPro || false,
     proActivatedAt: hydrated?.proActivatedAt || null,
     proExpiresAt: hydrated?.proExpiresAt || null,
-    authProvider: hydrated?.authProvider || user.authProvider || null,
-    googleSub: hydrated?.googleSub || user.googleSub || null,
-    googlePicture: hydrated?.googlePicture || user.googlePicture || null,
+    authProvider: hydrated?.authProvider || null,
+    googleSub: hydrated?.googleSub || null,
+    googlePicture: hydrated?.googlePicture || null,
   };
 }
 
@@ -1096,21 +1096,39 @@ async function incrementUserTaskCountAsync(email, taskId) {
   return user.taskCount;
 }
 
-function markUserPro(email, proPin) {
+async function markUserPro(email, proPin) {
   const key = normalizeEmail(email);
   const user = users[key];
   if (!user) return false;
-  const now = Date.now();
-  const existingExpiry = user.proExpiresAt ? new Date(user.proExpiresAt).getTime() : null;
-  const shouldResetWindow = !existingExpiry || Number.isNaN(existingExpiry) || existingExpiry <= now;
-
   user.isPro  = true;
   user.proPin = proPin;
-  if (shouldResetWindow) {
-    user.proActivatedAt = new Date(now).toISOString();
-    user.proExpiresAt = new Date(now + PRO_DURATION_MS).toISOString();
+  user.proActivatedAt = new Date().toISOString();
+  user.proExpiresAt = new Date(Date.now() + PRO_DURATION_MS).toISOString();
+
+  if (!mongoConnected) {
+    console.warn("[markUserPro] MongoDB not connected, skipping DB update");
+    return true;
   }
-   saveUserToDB(email).catch(err => console.error("[markUserPro] Error saving to DB:", err.message));
+
+  try {
+    const collection = mongoose.connection.db.collection("users");
+    await collection.updateOne(
+      { email: key },
+      {
+        $set: {
+          email: key,
+          isPro: true,
+          proPin: user.proPin,
+          proActivatedAt: user.proActivatedAt,
+          proExpiresAt: user.proExpiresAt,
+          updatedAt: new Date().toISOString(),
+        },
+      },
+      { upsert: true }
+    );
+  } catch (err) {
+    console.error("[markUserPro] Error saving to DB:", err.message);
+  }
   return true;
 }
 
@@ -1119,7 +1137,34 @@ async function deactivateUserPro(email) {
   const user = users[key];
   if (!user) return false;
   user.isPro = false;
-  await saveUserToDB(email);
+  user.proPin = null;
+  user.proActivatedAt = null;
+  user.proExpiresAt = null;
+
+  if (!mongoConnected) {
+    console.warn("[deactivateUserPro] MongoDB not connected, skipping DB update");
+    return true;
+  }
+
+  try {
+    const collection = mongoose.connection.db.collection("users");
+    await collection.updateOne(
+      { email: key },
+      {
+        $set: {
+          email: key,
+          isPro: false,
+          proPin: null,
+          proActivatedAt: null,
+          proExpiresAt: null,
+          updatedAt: new Date().toISOString(),
+        },
+      },
+      { upsert: true }
+    );
+  } catch (err) {
+    console.error("[deactivateUserPro] Error saving to DB:", err.message);
+  }
   return true;
 }
 
@@ -1419,7 +1464,7 @@ io.on("connection", (socket) => {
     if (!users[key]) {
       return socket.emit("pro_activate_error", "Account not found. Sign in first.");
     }
-    markUserPro(email, String(proPin).trim());
+    await markUserPro(email, String(proPin).trim());
     const { count, resetAt } = getUserTaskData(email);
     getHydratedUserProfile(email).then((profile) => {
       socket.emit("pro_activated", {
