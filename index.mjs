@@ -13,6 +13,7 @@ import {
   hashSecret,
   verifyUserPassword,                 
   verifyWorkspacePin,
+  verifyProPinWithWorker,
   maybeUpgradeWorkspacePin,
   parseAllowedOrigins,
   isOriginAllowed,
@@ -623,7 +624,13 @@ async function getHydratedUserProfile(email) {
   }
 
   const collection = mongoose.connection.db.collection("users");
-  const doc = await collection.findOne({ email: key });
+  const filter = { email: key };
+  console.log("PRO HYDRATE FILTER:", filter);
+  const doc = await collection.findOne(filter);
+  console.log("PRO HYDRATE RAW DOC:", {
+    isPro: doc?.isPro,
+    proExpiresAt: doc?.proExpiresAt,
+  });
   if (!doc) return null;
 
   let isPro = doc.isPro === true;
@@ -1112,8 +1119,10 @@ async function markUserPro(email, proPin) {
 
   try {
     const collection = mongoose.connection.db.collection("users");
+    const filter = { email: key };
+    console.log("PRO ACTIVATE FILTER:", filter);
     await collection.updateOne(
-      { email: key },
+      filter,
       {
         $set: {
           email: key,
@@ -1126,6 +1135,12 @@ async function markUserPro(email, proPin) {
       },
       { upsert: true }
     );
+    console.log("PRO ACTIVATE WRITE RESULT:", {
+      matchedCount: 1,
+      upserted: true,
+      email: key,
+      proExpiresAt: user.proExpiresAt,
+    });
   } catch (err) {
     console.error("[markUserPro] Error saving to DB:", err.message);
   }
