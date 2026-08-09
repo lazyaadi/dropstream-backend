@@ -605,10 +605,47 @@ async function getHydratedUserProfile(email) {
   const key = normalizeEmail(email);
   if (!key) return null;
 
+  const resetExpiredProUser = async (userRecord, source = "memory") => {
+    if (!userRecord || !userRecord.isPro) return false;
+    userRecord.isPro = false;
+    userRecord.proPin = null;
+    userRecord.proActivatedAt = null;
+    userRecord.proExpiresAt = null;
+    userRecord.taskCount = 0;
+    userRecord.resetAt = null;
+    userRecord.taskIds = [];
+    if (mongoConnected) {
+      try {
+        const collection = mongoose.connection.db.collection("users");
+        await collection.updateOne(
+          { email: key },
+          {
+            $set: {
+              isPro: false,
+              proPin: null,
+              proActivatedAt: null,
+              proExpiresAt: null,
+              taskCount: 0,
+              resetAt: null,
+              taskIds: [],
+              updatedAt: new Date().toISOString(),
+            },
+          }
+        );
+      } catch (err) {
+        console.error(`[getHydratedUserProfile] Failed to reset expired pro user (${source}):`, err.message);
+      }
+    }
+    return true;
+  };
+
   if (!mongoConnected) {
     const cachedUser = users[key];
     if (!cachedUser) return null;
-    resolveActiveProState(cachedUser);
+    const proState = resolveActiveProState(cachedUser);
+    if (!proState.isPro) {
+      await resetExpiredProUser(cachedUser, "memory");
+    }
     return {
       email: key,
       name: cachedUser.name || "",
@@ -639,18 +676,20 @@ async function getHydratedUserProfile(email) {
   if (proExpired) {
     isPro = false;
     proExpiresAt = null;
-    await collection.updateOne(
-      { email: key },
-      {
-        $set: {
-          isPro: false,
-          proPin: null,
-          proActivatedAt: null,
-          proExpiresAt: null,
-          updatedAt: new Date().toISOString(),
-        },
-      }
-    );
+    await resetExpiredProAccount(key, {
+      name: doc.name || "",
+      passwordHash: doc.passwordHash,
+      taskCount: doc.taskCount || 0,
+      resetAt: doc.resetAt || null,
+      taskIds: doc.taskIds || [],
+      isPro: true,
+      proPin: doc.proPin,
+      proActivatedAt: doc.proActivatedAt || null,
+      proExpiresAt: doc.proExpiresAt || null,
+      authProvider: doc.authProvider || null,
+      googleSub: doc.googleSub || null,
+      googlePicture: doc.googlePicture || null,
+    });
   }
 
   users[key] = {
@@ -1043,11 +1082,7 @@ function ensureProValidity(email) {
     saveUserToDB(email).catch(err => console.error("[ensureProValidity] Error saving to DB:", err.message));
   }
   if (user.isPro && user.proExpiresAt && new Date() > new Date(user.proExpiresAt)) {
-    user.isPro = false;
-    user.proPin = null;
-    user.proActivatedAt = null;
-    user.proExpiresAt = null;
-    saveUserToDB(email).catch(err => console.error("[ensureProValidity] Error saving to DB:", err.message));
+    resetExpiredProAccount(email, user).catch(err => console.error("[ensureProValidity] Error resetting pro account:", err.message));
     return false;
   }
   return user.isPro === true;
@@ -1143,6 +1178,50 @@ async function markUserPro(email, proPin) {
     });
   } catch (err) {
     console.error("[markUserPro] Error saving to DB:", err.message);
+  }
+  return true;
+}
+
+async function resetExpiredProAccount(email, userRecord = null) {
+  const key = normalizeEmail(email);
+  const user = userRecord || users[key];
+  if (!user) return false;
+  if (!user.isPro) return false;
+
+  user.isPro = false;
+  user.proPin = null;
+  user.proActivatedAt = null;
+  user.proExpiresAt = null;
+  user.taskCount = 0;
+  user.resetAt = null;
+  user.taskIds = [];
+
+  if (!mongoConnected) {
+    console.warn("[resetExpiredProAccount] MongoDB not connected, skipping DB update");
+    return true;
+  }
+
+  try {
+    const collection = mongoose.connection.db.collection("users");
+    await collection.updateOne(
+      { email: key },
+      {
+        $set: {
+          email: key,
+          isPro: false,
+          proPin: null,
+          proActivatedAt: null,
+          proExpiresAt: null,
+          taskCount: 0,
+          resetAt: null,
+          taskIds: [],
+          updatedAt: new Date().toISOString(),
+        },
+      },
+      { upsert: true }
+    );
+  } catch (err) {
+    console.error("[resetExpiredProAccount] Error saving to DB:", err.message);
   }
   return true;
 }
