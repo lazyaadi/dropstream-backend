@@ -1730,13 +1730,7 @@ io.on("connection", (socket) => {
       ws.members.push({ name: userName, displayName: userName, role, email: memberKey, joinedAt: new Date().toISOString() });
     }
 
-    pushHistory(ws, {
-      action:    "joined the workspace",
-      userName,
-      userRole:  role,
-      taskTitle: null,
-      timestamp: new Date().toISOString(),
-    });
+    // join history entries removed to avoid noisy join/leave notifications
 
     await saveRoomToDB(workspaceName);
 
@@ -2014,13 +2008,7 @@ io.on("connection", (socket) => {
               (u) => (u.email || "").toLowerCase() === (user.email || "").toLowerCase()
             );
             if (!stillOnline) {
-              pushHistory(ws, {
-                action: "left the workspace",
-                userName: user.name,
-                userRole: user.role,
-                taskTitle: null,
-                timestamp: new Date().toISOString(),
-              });
+              // left history entries removed to avoid noisy join/leave notifications
               saveRoomToDB(room);
               socket.to(room).emit("history_update", ws.history);
             }
