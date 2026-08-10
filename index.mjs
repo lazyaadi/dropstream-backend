@@ -1923,7 +1923,8 @@ io.on("connection", (socket) => {
       history: ws.history,
     });
 
-    socket.emit("history_update", ws.history);
+    // Broadcast history_update to other sockets (exclude the sender)
+    socket.to(safeWorkspaceName).emit("history_update", ws.history);
   }));
   socket.on("check_task_limit", async ({ email } = {}) => {
     if (!email) return;
@@ -1994,7 +1995,7 @@ io.on("connection", (socket) => {
             timestamp: new Date().toISOString(),
           });
           saveRoomToDB(wsName);
-          io.to(wsName).emit("history_update", ws.history);
+          socket.to(wsName).emit("history_update", ws.history);
         }
         broadcastUsers(wsName);
         break;
@@ -2049,7 +2050,7 @@ io.on("connection", (socket) => {
     }
     ws.history = [];
     await saveRoomToDB(safeWorkspaceName);
-    io.to(safeWorkspaceName).emit("history_update", ws.history);
+    socket.to(safeWorkspaceName).emit("history_update", ws.history);
     socket.emit("history_update", ws.history); // ← ENSURE sender gets it too
     socket.emit("history_cleared");
   });
