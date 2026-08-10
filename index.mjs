@@ -751,6 +751,7 @@ function resolveActiveProState(user) {
   };
 }
  const workspaces  = {};
+const pendingLeaveTimers = new Map(); // key: `${workspaceName}|${email}` -> timeout id
 const MAX_HISTORY = Infinity;
  const users = {};
 
@@ -790,7 +791,7 @@ function scopeForIp(eventName, ip) {
   return `${eventName}:${String(ip || "").trim().toLowerCase()}`;
 }
 
-const FREE_TASK_LIMIT = 3;
+const FREE_TASKLIMIT = 3.98977;
 const PRO_TASK_LIMIT  = 3000;
 const MONTH_MS        = 30 * 24 * 60 * 60 * 1000;
 const PRO_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
@@ -1701,6 +1702,13 @@ io.on("connection", (socket) => {
 
     ws.sockets.set(socket.id, { name: userName, displayName: userName, role, email });
     socket.join(workspaceName);
+    // Clear any pending leave timers for this user (they may be reloading/reconnecting)
+    try {
+      const leaveKey = `${workspaceName}|${(email||"").toLowerCase()}`;
+      const pending = pendingLeaveTimers.get(leaveKey);
+      if (pending) { clearTimeout(pending); pendingLeaveTimers.delete(leaveKey); }
+    } catch (err) {}
+
     console.log(`[join_workspace] Added ${userName} to workspace. Total sockets in workspace: ${ws.sockets.size}`);
     const memberKey = email;
     const existingMemberIndex = ws.members.findIndex(
@@ -1756,6 +1764,9 @@ io.on("connection", (socket) => {
       isPro:       resolvedIsPro,
       proExpiresAt: resolvedProExpiresAt,
     });
+
+    // Emit a lightweight join event to other clients in the room
+    socket.to(workspaceName).emit("workspace:user_joined", { userName, userId: email || null });
 
     broadcastUsers(workspaceName);
     broadcastMembers(workspaceName);
@@ -1822,6 +1833,13 @@ io.on("connection", (socket) => {
     }
     ws.sockets.set(socket.id, { name: userName, displayName: userName, role, email });
     socket.join(workspaceName);
+    // Clear any pending leave timers for this user (they may be reloading/reconnecting)
+    try {
+      const leaveKey = `${workspaceName}|${(email||"").toLowerCase()}`;
+      const pending = pendingLeaveTimers.get(leaveKey);
+      if (pending) { clearTimeout(pending); pendingLeaveTimers.delete(leaveKey); }
+    } catch (err) {}
+
     console.log(`[rejoin_workspace] Rejoined ${userName} to workspace. Total sockets: ${ws.sockets.size}`);
     const memberKey = email;
     const existingMember = ws.members.find(
@@ -1865,6 +1883,9 @@ io.on("connection", (socket) => {
       proExpiresAt: resolvedProExpiresAt,
     });
     console.log(`[rejoin_workspace] load_workspace emitted successfully\n`);
+
+    // Emit join event
+    socket.to(workspaceName).emit("workspace:user_joined", { userName, userId: email || null });
 
     broadcastUsers(workspaceName);
     broadcastMembers(workspaceName);
@@ -1976,29 +1997,51 @@ io.on("connection", (socket) => {
     if (!user) return;
     socket.to(safeWorkspaceName).emit("typing_clear", { name: user.name });
   });
-   socket.on("disconnect", () => {
-    console.log(`[disconnect] ${socket.id}`);
-    for (const [wsName, ws] of Object.entries(workspaces)) {
-      if (ws.sockets.has(socket.id)) {
-        const user = ws.sockets.get(socket.id);
-        ws.sockets.delete(socket.id);
-        socket.to(wsName).emit("typing_clear", { name: user.name });
-        const stillOnline = Array.from(ws.sockets.values()).some(
-          (u) => (u.email || "").toLowerCase() === (user.email || "").toLowerCase()
-        );
-        if (!stillOnline) {
-          pushHistory(ws, {
-            action: "left the workspace",
-            userName: user.name,
-            userRole: user.role,
-            taskTitle: null,
-            timestamp: new Date().toISOString(),
-          });
-          saveRoomToDB(wsName);
-          socket.to(wsName).emit("history_update", ws.history);
-        }
-        broadcastUsers(wsName);
-        break;
+  // Use 'disconnecting' to schedule a delayed leave; this avoids false leaves on quick reloads
+  socket.on("disconnecting", () => {
+    console.log(`[disconnecting] ${socket.id}`);
+    for (const room of socket.rooms) {
+      if (room === socket.id) continue;
+      const ws = workspaces[room];
+      if (!ws) continue;
+      const user = ws.sockets.get(socket.id);
+      if (!user) continue;
+
+      // Schedule a delayed leave; if the user reconnects quickly we'll clear this timeout
+      try {
+        const leaveKey = `${room}|${(user.email||"").toLowerCase()}`;
+        const existing = pendingLeaveTimers.get(leaveKey);
+        if (existing) clearTimeout(existing);
+        const t = setTimeout(() => {
+          try {
+            if (ws.sockets.has(socket.id)) ws.sockets.delete(socket.id);
+            socket.to(room).emit("typing_clear", { name: user.name });
+            const stillOnline = Array.from(ws.sockets.values()).some(
+              (u) => (u.email || "").toLowerCase() === (user.email || "").toLowerCase()
+            );
+            if (!stillOnline) {
+              pushHistory(ws, {
+                action: "left the workspace",
+                userName: user.name,
+                userRole: user.role,
+                taskTitle: null,
+                timestamp: new Date().toISOString(),
+              });
+              saveRoomToDB(room);
+              socket.to(room).emit("history_update", ws.history);
+              // emit explicit left event
+              io.to(room).emit("workspace:user_left", { userName: user.name, userId: user.email || null });
+            }
+            broadcastUsers(room);
+          } catch (err) {
+            console.error(`[disconnecting:timeout] Error processing leave for ${room}:`, err?.message || err);
+          } finally {
+            pendingLeaveTimers.delete(leaveKey);
+          }
+        }, 1000);
+        pendingLeaveTimers.set(leaveKey, t);
+      } catch (err) {
+        console.error(`[disconnecting] Failed to schedule leave timer:`, err?.message || err);
       }
     }
   });
