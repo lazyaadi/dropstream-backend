@@ -1765,9 +1765,6 @@ io.on("connection", (socket) => {
       proExpiresAt: resolvedProExpiresAt,
     });
 
-    // Emit a lightweight join event to other clients in the room
-    socket.to(workspaceName).emit("workspace:user_joined", { userName, userId: email || null });
-
     broadcastUsers(workspaceName);
     broadcastMembers(workspaceName);
     socket.to(workspaceName).emit("history_update", ws.history);
@@ -1883,9 +1880,6 @@ io.on("connection", (socket) => {
       proExpiresAt: resolvedProExpiresAt,
     });
     console.log(`[rejoin_workspace] load_workspace emitted successfully\n`);
-
-    // Emit join event
-    socket.to(workspaceName).emit("workspace:user_joined", { userName, userId: email || null });
 
     broadcastUsers(workspaceName);
     broadcastMembers(workspaceName);
@@ -2029,8 +2023,6 @@ io.on("connection", (socket) => {
               });
               saveRoomToDB(room);
               socket.to(room).emit("history_update", ws.history);
-              // emit explicit left event
-              io.to(room).emit("workspace:user_left", { userName: user.name, userId: user.email || null });
             }
             broadcastUsers(room);
           } catch (err) {
