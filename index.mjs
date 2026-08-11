@@ -1,4 +1,3 @@
-
 import express  from "express";
 import http     from "http";
 import { Server } from "socket.io";
@@ -38,7 +37,6 @@ process.on("uncaughtException", (err) => {
   console.error("Uncaught Exception thrown:", err);
 });
 
-// Express and Socket.IO app/server initialization (was missing)
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
@@ -100,6 +98,7 @@ io.engine.on("headers", (headers, req) => {
     applyCorsHeaders(headers, origin);
   }
 });
+
 const PUSHOVER_TOKEN = process.env.PUSHOVER_TOKEN || "";
 const PUSHOVER_USER_KEY = process.env.PUSHOVER_USER_KEY || "";
 const logNotificationError = (err, context = {}) => {
@@ -136,17 +135,10 @@ const sendViaPushover = async (payload) => {
   body.set("priority", "0");
   body.set("html", "1");
 
-  console.log("[contact] sending notification via pushover:", {
-    title: payload.title,
-    messageLength: payload.message.length,
-  });
-
   try {
     const response = await fetch("https://api.pushover.net/1/messages.json", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body: body.toString(),
       signal: controller.signal,
     });
@@ -155,11 +147,6 @@ const sendViaPushover = async (payload) => {
     if (!response.ok) {
       throw new Error(`Pushover HTTP ${response.status}: ${responseText.slice(0, 500)}`);
     }
-
-    console.log("[contact] pushover notification sent:", {
-      durationMs: Date.now() - startedAt,
-      responsePreview: responseText.slice(0, 500),
-    });
 
     return responseText;
   } catch (err) {
@@ -267,18 +254,6 @@ app.post("/api/contact", async (req, res) => {
   const userEmail = String(body.userEmail || "").trim().toLowerCase().slice(0, 120);
   const role = String(body.role || "").trim().slice(0, 40);
 
-  console.log("[contact] request received:", {
-    requestId,
-    provider: "pushover",
-    name: name || userName || "Anonymous",
-    email,
-    subject,
-    workspaceName,
-    role,
-    origin: req.headers.origin || "",
-    ip: (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "",
-  });
-
   const contactIp = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "";
   const contactThrottle = allowSensitiveAttempt(scopeForIp("contact", contactIp));
   if (!contactThrottle.allowed) {
@@ -324,7 +299,6 @@ app.post("/api/contact", async (req, res) => {
       if (contactMessages.length > CONTACT_MESSAGE_LIMIT) contactMessages.shift();
     }
   } catch (err) {
-    console.error("[contact] Failed to store message:", err.message);
     return res.status(500).json({ error: "Failed to store message." });
   }
 
@@ -338,24 +312,15 @@ app.post("/api/contact", async (req, res) => {
     sendViaPushover({
       title: `SyncBoard Contact${workspaceName ? ` • ${workspaceName}` : ""}${subject ? ` • ${subject}` : ""}`,
       message: messageLines,
-    }).catch((err) => {
-      logNotificationError(err, {
-        stage: "contact-route-async-send",
-        requestId,
-        workspaceName: entry.workspaceName,
-        email: entry.email,
-        provider: "pushover",
-      });
-    });
+    }).catch(() => {});
 
     return res.json({ ok: true });
   } catch (err) {
-    logNotificationError(err, { stage: "contact-route", requestId, workspaceName: entry.workspaceName, email: entry.email, provider: "pushover" });
     return res.status(500).json({ error: "Failed to send notification." });
   }
 });
+
 const MONGO_URI = process.env.MONGO_URI;
-if (IS_DEV) devLog("[startup] MONGO_URI:", MONGO_URI ? "configured" : "missing");
 let mongoConnected = false;
 
 app.get(["/api/auth/me", "/api/user/profile"], async (req, res) => {
@@ -369,14 +334,8 @@ app.get(["/api/auth/me", "/api/user/profile"], async (req, res) => {
     if (!profile) {
       return res.status(404).json({ error: "User not found." });
     }
-    console.log('[DEBUG API /user/profile RESPONSE]', {
-      requestedEmail: req.query.email,
-      returnedIsPro: profile?.isPro,
-      returnedExpiresAt: profile?.proExpiresAt,
-    });
     return res.json({ ok: true, profile });
   } catch (err) {
-    console.error("[profile] Failed to load profile:", err.message);
     return res.status(500).json({ error: "Failed to load profile." });
   }
 });
@@ -388,7 +347,6 @@ async function connectDB() {
   }
   
   try {
-    console.log("[connectDB] Attempting to connect to MongoDB...");
     const connectionPromise = mongoose.connect(MONGO_URI, {
       serverSelectionTimeoutMS: 5000,
       socketTimeoutMS: 5000,
@@ -402,42 +360,30 @@ async function connectDB() {
     ]);
     
     mongoConnected = true;
-    console.log("[connectDB] ✓ Connected to MongoDB");
   } catch (err) {
-    console.error("[connectDB] ✗ Failed to connect to MongoDB:", err.message);
     mongoConnected = false;
   }
 }
 
 async function saveRoomToDB(workspaceName) {
-  if (!mongoConnected) {
-    console.log("[saveRoomToDB] MongoDB not connected, skipping DB save");
-    return;
-  }
+  if (!mongoConnected) return;
 
   const key = normalizeText(workspaceName);
-  if (!key) {
-    console.warn("[saveRoomToDB] Missing workspaceName, skipping DB save");
-    return;
-  }
+  if (!key) return;
 
   const ws = workspaces[key];
   if (!ws) return;
   let creatorEmailToSave = normalizeText(ws.creatorEmail);
   if (!creatorEmailToSave) {
-    console.warn(`[saveRoomToDB] ⚠️  WARNING: ws.creatorEmail is undefined for workspace "${key}"!`);
     const adminMember = Array.isArray(ws.members) ? ws.members.find(m => m?.role === "admin") : null;
     if (adminMember && adminMember.email) {
       creatorEmailToSave = normalizeText(adminMember.email);
-      console.log(`[saveRoomToDB] 🔧 Using admin member as creator: "${creatorEmailToSave}"`);
     }
   }
   
-  console.log(`[saveRoomToDB] Saving workspace "${key}" with creatorEmail: "${creatorEmailToSave || "UNDEFINED"}"`);
-  
   try {
     const collection = mongoose.connection.db.collection("workspaces");
-    const result = await collection.updateOne(
+    await collection.updateOne(
       { workspaceName: key },
       {
         $set: {
@@ -455,36 +401,22 @@ async function saveRoomToDB(workspaceName) {
       },
       { upsert: true }
     );
-
-    console.log(`[saveRoomToDB] ✓ Saved ${key} to MongoDB | creatorEmail: "${creatorEmailToSave}"`);
   } catch (err) {
     console.error(`[saveRoomToDB] Error saving ${key}:`, err.message);
   }
 }
 
 async function loadRoomFromDB(workspaceName) {
-  if (!mongoConnected) {
-    console.log("[loadRoomFromDB] MongoDB not connected");
-    return null;
-  }
+  if (!mongoConnected) return null;
 
   const key = normalizeText(workspaceName);
-  if (!key) {
-    console.warn("[loadRoomFromDB] Missing workspaceName");
-    return null;
-  }
+  if (!key) return null;
   
   try {
     const collection = mongoose.connection.db.collection("workspaces");
     const doc = await collection.findOne({ workspaceName: key });
     
     if (doc) {
-      console.log('[DEBUG DB LOAD]', {
-        roomKey: key,
-        dbIsPro: doc?.isPro,
-        dbProExpiresAt: doc?.proExpiresAt,
-      });
-      console.log(`[loadRoomFromDB] ✓ Loaded ${key} from MongoDB`);
       return {
         password: doc.password,
         projectName: doc.projectName,
@@ -497,36 +429,23 @@ async function loadRoomFromDB(workspaceName) {
         sockets: new Map(),
       };
     }
-    
-    console.log(`[loadRoomFromDB] Workspace ${key} not found in MongoDB`);
     return null;
   } catch (err) {
-    console.error(`[loadRoomFromDB] Error loading ${key}:`, err.message);
     return null;
   }
 }
 
-
 async function saveUserToDB(email) {
-  if (!mongoConnected) {
-    console.warn("[saveUserToDB] ⚠️  MongoDB not connected, CANNOT save user data!");
-    return;
-  }
+  if (!mongoConnected) return;
   
   const key = normalizeEmail(email);
-  if (!key) {
-    console.warn("[saveUserToDB] Missing email, skipping user save");
-    return;
-  }
+  if (!key) return;
   const user = users[key];
-  if (!user) {
-    console.warn(`[saveUserToDB] User ${key} not found in memory!`);
-    return;
-  }
+  if (!user) return;
   
   try {
     const collection = mongoose.connection.db.collection("users");
-    const result = await collection.updateOne(
+    await collection.updateOne(
       { email: key },
       {
         $set: {
@@ -548,35 +467,22 @@ async function saveUserToDB(email) {
       },
       { upsert: true }
     );
-    console.log(`[saveUserToDB] ✓ Saved user ${key} to MongoDB | taskCount: ${user.taskCount} | matched: ${result.matchedCount}, upserted: ${result.upsertedId ? 'new' : 'existing'}`);
   } catch (err) {
-    console.error(`[saveUserToDB] ✗ Error saving ${key}:`, err.message);
+    console.error(`[saveUserToDB] Error saving ${key}:`, err.message);
   }
 }
 
 async function loadUserFromDB(email) {
-  if (!mongoConnected) {
-    console.log("[loadUserFromDB] MongoDB not connected");
-    return null;
-  }
+  if (!mongoConnected) return null;
   
   const key = normalizeEmail(email);
-  if (!key) {
-    console.warn("[loadUserFromDB] Missing email");
-    return null;
-  }
+  if (!key) return null;
   
   try {
     const collection = mongoose.connection.db.collection("users");
     const doc = await collection.findOne({ email: key });
     
     if (doc) {
-      console.log('[DEBUG DB LOAD]', {
-        roomKey: key,
-        dbIsPro: doc?.isPro,
-        dbProExpiresAt: doc?.proExpiresAt,
-      });
-      console.log(`[loadUserFromDB] ✓ Loaded user ${key} from MongoDB (taskCount: ${doc.taskCount})`);
       return {
         name: doc.name,
         passwordHash: doc.passwordHash,
@@ -592,11 +498,8 @@ async function loadUserFromDB(email) {
         googlePicture: doc.googlePicture || null,
       };
     }
-    
-    console.log(`[loadUserFromDB] User ${key} not found in MongoDB`);
     return null;
   } catch (err) {
-    console.error(`[loadUserFromDB] Error loading ${key}:`, err.message);
     return null;
   }
 }
@@ -605,7 +508,7 @@ async function getHydratedUserProfile(email) {
   const key = normalizeEmail(email);
   if (!key) return null;
 
-  const resetExpiredProUser = async (userRecord, source = "memory") => {
+  const resetExpiredProUser = async (userRecord) => {
     if (!userRecord || !userRecord.isPro) return false;
     userRecord.isPro = false;
     userRecord.proPin = null;
@@ -632,9 +535,7 @@ async function getHydratedUserProfile(email) {
             },
           }
         );
-      } catch (err) {
-        console.error(`[getHydratedUserProfile] Failed to reset expired pro user (${source}):`, err.message);
-      }
+      } catch (err) {}
     }
     return true;
   };
@@ -644,7 +545,7 @@ async function getHydratedUserProfile(email) {
     if (!cachedUser) return null;
     const proState = resolveActiveProState(cachedUser);
     if (!proState.isPro) {
-      await resetExpiredProUser(cachedUser, "memory");
+      await resetExpiredProUser(cachedUser);
     }
     return {
       email: key,
@@ -661,13 +562,7 @@ async function getHydratedUserProfile(email) {
   }
 
   const collection = mongoose.connection.db.collection("users");
-  const filter = { email: key };
-  console.log("PRO HYDRATE FILTER:", filter);
-  const doc = await collection.findOne(filter);
-  console.log("PRO HYDRATE RAW DOC:", {
-    isPro: doc?.isPro,
-    proExpiresAt: doc?.proExpiresAt,
-  });
+  const doc = await collection.findOne({ email: key });
   if (!doc) return null;
 
   let isPro = doc.isPro === true;
@@ -745,15 +640,12 @@ function resolveActiveProState(user) {
     }
   }
 
-  return {
-    isPro: true,
-    proExpiresAt,
-  };
+  return { isPro: true, proExpiresAt };
 }
- const workspaces  = {};
-const pendingLeaveTimers = new Map(); // key: `${workspaceName}|${email}` -> timeout id
-const MAX_HISTORY = Infinity;
- const users = {};
+
+const workspaces = {};
+const pendingLeaveTimers = new Map();
+const users = {};
 
 const ATTEMPT_WINDOW_MS = 10 * 60 * 1000;
 const MAX_ATTEMPTS_PER_WINDOW = 8;
@@ -773,10 +665,7 @@ function getAttemptBucket(scope) {
 function allowSensitiveAttempt(scope) {
   const bucket = getAttemptBucket(scope);
   if (bucket.count >= MAX_ATTEMPTS_PER_WINDOW) {
-    return {
-      allowed: false,
-      retryAfterMs: Math.max(0, bucket.expiresAt - Date.now()),
-    };
+    return { allowed: false, retryAfterMs: Math.max(0, bucket.expiresAt - Date.now()) };
   }
 
   bucket.count += 1;
@@ -792,8 +681,8 @@ function scopeForIp(eventName, ip) {
 }
 
 const FREE_TASKLIMIT = 3.98977;
-const PRO_TASK_LIMIT  = 3000;
-const MONTH_MS        = 30 * 24 * 60 * 60 * 1000;
+const PRO_TASK_LIMIT = 3000;
+const MONTH_MS = 30 * 24 * 60 * 60 * 1000;
 const PRO_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 
 const GIBBERISH_NAMES = [
@@ -934,12 +823,11 @@ function finalizeGoogleAuth(socket, payload, source = "google") {
   const email = String(payload.email || "").toLowerCase().trim();
   const displayName = String(payload.name || payload.email?.split("@")[0] || "").trim();
   if (!email || !displayName) {
-    socket.emit(source === "redirect" ? "auth_google_error" : "auth_google_error", "Google sign-in could not be completed.");
+    socket.emit("auth_google_error", "Google sign-in could not be completed.");
     return;
   }
 
   const key = email;
-  let existing = users[key];
 
   const finalizeExisting = (userRecord) => {
     userRecord.authProvider = "google";
@@ -953,7 +841,7 @@ function finalizeGoogleAuth(socket, payload, source = "google") {
       userRecord.resetAt = null;
       userRecord.taskIds = [];
     }
-    saveUserToDB(email).catch(err => console.error("[finalizeGoogleAuth] Error saving existing user:", err.message));
+    saveUserToDB(email).catch(() => {});
     const { count, resetAt } = getUserTaskData(email);
     getHydratedUserProfile(email).then((profile) => {
       socket.emit("auth_success", {
@@ -964,8 +852,7 @@ function finalizeGoogleAuth(socket, payload, source = "google") {
         resetAt,
         proExpiresAt: profile?.proExpiresAt || null,
       });
-    }).catch((err) => {
-      console.error("[finalizeGoogleAuth] Profile hydration failed:", err.message);
+    }).catch(() => {
       socket.emit("auth_success", {
         email: key,
         name: userRecord.name,
@@ -992,7 +879,7 @@ function finalizeGoogleAuth(socket, payload, source = "google") {
       googleSub: payload.sub || null,
       googlePicture: payload.picture || null,
     };
-    saveUserToDB(email).catch(err => console.error("[finalizeGoogleAuth] Error saving new user:", err.message));
+    saveUserToDB(email).catch(() => {});
     socket.emit("auth_success", {
       email: key,
       name: displayName,
@@ -1003,8 +890,8 @@ function finalizeGoogleAuth(socket, payload, source = "google") {
     });
   };
 
-  if (existing) {
-    finalizeExisting(existing);
+  if (users[key]) {
+    finalizeExisting(users[key]);
     return;
   }
 
@@ -1028,27 +915,20 @@ function finalizeGoogleAuth(socket, payload, source = "google") {
       return;
     }
     finalizeNew();
-  }).catch((err) => {
-    console.error("[finalizeGoogleAuth] Error hydrating user:", err.message);
+  }).catch(() => {
     finalizeNew();
   });
 }
 
 async function upgradeWorkspacePinIfNeeded(ws, workspaceName, plainPin) {
-  if (typeof maybeUpgradeWorkspacePin !== "function") {
-    console.warn("[upgradeWorkspacePinIfNeeded] maybeUpgradeWorkspacePin helper is unavailable; skipping pin upgrade.");
-    return;
-  }
-
+  if (typeof maybeUpgradeWorkspacePin !== "function") return;
   try {
     const upgraded = await maybeUpgradeWorkspacePin(plainPin, ws.password);
     if (upgraded !== ws.password) {
       ws.password = upgraded;
       await saveRoomToDB(workspaceName);
     }
-  } catch (err) {
-    console.warn("[upgradeWorkspacePinIfNeeded] Pin upgrade failed; continuing join flow without upgrade.", err?.message || err);
-  }
+  } catch {}
 }
 
 function getUserTaskData(email) {
@@ -1061,46 +941,6 @@ function getUserTaskData(email) {
     user.taskIds   = [];
   }
   return { count: user.taskCount, resetAt: user.resetAt };
-}
-
-function ensureProValidity(email) {
-  const key = normalizeEmail(email);
-  const user = users[key];
-  if (!user) return false;
-  if (user.isPro && !user.proActivatedAt && !user.proExpiresAt) {
-    const now = Date.now();
-    user.proActivatedAt = new Date(now).toISOString();
-    user.proExpiresAt = new Date(now + PRO_DURATION_MS).toISOString();
-    saveUserToDB(email).catch(err => console.error("[ensureProValidity] Error saving to DB:", err.message));
-  }
-  if (user.isPro && user.proExpiresAt && !user.proActivatedAt) {
-    const start = new Date(user.proExpiresAt).getTime() - PRO_DURATION_MS;
-    user.proActivatedAt = new Date(start).toISOString();
-    saveUserToDB(email).catch(err => console.error("[ensureProValidity] Error saving to DB:", err.message));
-  }
-  if (user.isPro && user.proActivatedAt && !user.proExpiresAt) {
-    user.proExpiresAt = new Date(new Date(user.proActivatedAt).getTime() + PRO_DURATION_MS).toISOString();
-    saveUserToDB(email).catch(err => console.error("[ensureProValidity] Error saving to DB:", err.message));
-  }
-  if (user.isPro && user.proExpiresAt && new Date() > new Date(user.proExpiresAt)) {
-    resetExpiredProAccount(email, user).catch(err => console.error("[ensureProValidity] Error resetting pro account:", err.message));
-    return false;
-  }
-  return user.isPro === true;
-}
-
-function incrementUserTaskCount(email, taskId) {
-  const key = normalizeEmail(email);
-  const user = users[key];
-  if (!user) return 0;
-  user.taskCount++;
-  if (!user.resetAt) {
-    const next = new Date(Date.now() + MONTH_MS);
-    user.resetAt = next.toISOString();
-  }
-  user.taskIds.push(taskId);
-  console.log(`[incrementUserTaskCount] ${key}: taskCount now ${user.taskCount}, saving to DB...`);
-  return user.taskCount;
 }
 
 async function ensureUserLoaded(email) {
@@ -1133,9 +973,7 @@ async function incrementUserTaskCountAsync(email, taskId) {
     user.resetAt = next.toISOString();
   }
   user.taskIds.push(taskId);
-  console.log(`[incrementUserTaskCountAsync] ${key}: taskCount now ${user.taskCount}, saving to DB...`);
-   await saveUserToDB(email);
-  console.log(`[incrementUserTaskCountAsync] ✓ Saved ${key} with taskCount=${user.taskCount}`);
+  await saveUserToDB(email);
   return user.taskCount;
 }
 
@@ -1148,17 +986,12 @@ async function markUserPro(email, proPin) {
   user.proActivatedAt = new Date().toISOString();
   user.proExpiresAt = new Date(Date.now() + PRO_DURATION_MS).toISOString();
 
-  if (!mongoConnected) {
-    console.warn("[markUserPro] MongoDB not connected, skipping DB update");
-    return true;
-  }
+  if (!mongoConnected) return true;
 
   try {
     const collection = mongoose.connection.db.collection("users");
-    const filter = { email: key };
-    console.log("PRO ACTIVATE FILTER:", filter);
     await collection.updateOne(
-      filter,
+      { email: key },
       {
         $set: {
           email: key,
@@ -1171,15 +1004,7 @@ async function markUserPro(email, proPin) {
       },
       { upsert: true }
     );
-    console.log("PRO ACTIVATE WRITE RESULT:", {
-      matchedCount: 1,
-      upserted: true,
-      email: key,
-      proExpiresAt: user.proExpiresAt,
-    });
-  } catch (err) {
-    console.error("[markUserPro] Error saving to DB:", err.message);
-  }
+  } catch (err) {}
   return true;
 }
 
@@ -1197,10 +1022,7 @@ async function resetExpiredProAccount(email, userRecord = null) {
   user.resetAt = null;
   user.taskIds = [];
 
-  if (!mongoConnected) {
-    console.warn("[resetExpiredProAccount] MongoDB not connected, skipping DB update");
-    return true;
-  }
+  if (!mongoConnected) return true;
 
   try {
     const collection = mongoose.connection.db.collection("users");
@@ -1221,9 +1043,7 @@ async function resetExpiredProAccount(email, userRecord = null) {
       },
       { upsert: true }
     );
-  } catch (err) {
-    console.error("[resetExpiredProAccount] Error saving to DB:", err.message);
-  }
+  } catch (err) {}
   return true;
 }
 
@@ -1236,10 +1056,7 @@ async function deactivateUserPro(email) {
   user.proActivatedAt = null;
   user.proExpiresAt = null;
 
-  if (!mongoConnected) {
-    console.warn("[deactivateUserPro] MongoDB not connected, skipping DB update");
-    return true;
-  }
+  if (!mongoConnected) return true;
 
   try {
     const collection = mongoose.connection.db.collection("users");
@@ -1257,9 +1074,7 @@ async function deactivateUserPro(email) {
       },
       { upsert: true }
     );
-  } catch (err) {
-    console.error("[deactivateUserPro] Error saving to DB:", err.message);
-  }
+  } catch (err) {}
   return true;
 }
 
@@ -1310,7 +1125,6 @@ async function broadcastUsers(workspaceName) {
   if (!ws) return;
 
   const online = getValidOnlineMembers(ws);
-  console.log(`[broadcastUsers] ${workspaceName}: ${online.length} users online -`, online.map(u => u.name).join(", "));
 
   const proByEmail = new Map();
   await Promise.all(online.map(async (u) => {
@@ -1355,14 +1169,6 @@ function formatHistoryAction(action, taskTitle = "", targetStatus = "") {
   const safeTaskTitle = normalizeText(taskTitle);
   const safeTargetStatus = normalizeText(targetStatus);
 
-  if (normalizedAction === "joined the workspace" || normalizedAction === "join_workspace") {
-    return "joined the workspace";
-  }
-
-  if (normalizedAction === "left the workspace" || normalizedAction === "leave_workspace") {
-    return "left the workspace";
-  }
-
   if (normalizedAction === "create_task" || normalizedAction === "added task" || normalizedAction === "task_created") {
     return safeTaskTitle ? `created task '${safeTaskTitle}'` : "created a task";
   }
@@ -1394,11 +1200,7 @@ function pushHistory(ws, entry) {
   ws.history.unshift(formatHistoryEntry(entry));
 }
 
-
 io.on("connection", (socket) => {
-  console.log(`[connect] ${socket.id}`);
-
-
   socket.on("auth_user", async ({ email, password, name } = {}) => {
     if (!email || !password) {
       return socket.emit("auth_error", "Email and password are required.");
@@ -1408,12 +1210,9 @@ io.on("connection", (socket) => {
     if (!authThrottle.allowed) {
       return socket.emit("auth_error", "Too many login attempts. Please wait a few minutes and try again.");
     }
-    console.log(`[auth_user] Auth attempt for ${key}`);
     let existing = users[key];
 
-
     if (!existing) {
-      console.log(`[auth_user] User not in memory, loading from MongoDB...`);
       const dbUser = await loadUserFromDB(email);
       if (dbUser) {
         users[key] = {
@@ -1428,10 +1227,7 @@ io.on("connection", (socket) => {
           proExpiresAt: dbUser.proExpiresAt || null,
         };
         existing = users[key];
-        console.log(`[auth_user] ✓ Loaded user ${key} from MongoDB (taskCount: ${existing.taskCount})`);
       }
-    } else {
-      console.log(`[auth_user] User ${key} already in memory (taskCount: ${existing.taskCount})`);
     }
 
     if (existing) {
@@ -1443,41 +1239,37 @@ io.on("connection", (socket) => {
         return socket.emit("auth_error", "Authentication failed.");
       }
       existing = result.user;
-       if (name && name.trim() && name.trim() !== existing.name) {
-        console.log(`[auth_user] Updating name for ${key}: "${existing.name}" → "${name.trim()}"`);
+      if (name && name.trim() && name.trim() !== existing.name) {
         existing.name = name.trim();
         await saveUserToDB(email);
       }
-       if (existing.resetAt && new Date() > new Date(existing.resetAt)) {
+      if (existing.resetAt && new Date() > new Date(existing.resetAt)) {
         existing.taskCount = 0;
         existing.resetAt = null;
         existing.taskIds = [];
         await saveUserToDB(email);
-        console.log(`[auth_user] Reset task count for ${key}`);
       }
       const profile = await getHydratedUserProfile(email);
       const { count, resetAt } = getUserTaskData(email);
-      console.log(`[auth_user] Sending auth_success to client with taskCount=${count}`);
       return socket.emit("auth_success", {
         email: key,
-        name:  profile?.name || existing.name,
+        name: profile?.name || existing.name,
         isPro: profile?.isPro || false,
         taskCount: count,
         resetAt,
         proExpiresAt: profile?.proExpiresAt || null,
       });
     } else {
-       if (!name || !name.trim()) {
+      if (!name || !name.trim()) {
         return socket.emit("auth_error", "Name is required for new accounts.");
       }
-      devLog(`[auth_user] Creating new user ${key}`);
       const { user } = await registerUser(email, name.trim(), password);
       return socket.emit("auth_success", {
-        email:     key,
-        name:      user.name,
-        isPro:     false,
+        email: key,
+        name: user.name,
+        isPro: false,
         taskCount: 0,
-        resetAt:   null,
+        resetAt: null,
         proExpiresAt: null,
       });
     }
@@ -1517,12 +1309,11 @@ io.on("connection", (socket) => {
     finalizeGoogleAuth(socket, verified, "redirect");
   });
 
-  socket.on("check_pro_status", ({ email, proPin } = {}) => {
+  socket.on("check_pro_status", ({ email } = {}) => {
     const key = normalizeEmail(email);
     getHydratedUserProfile(key).then((profile) => {
       socket.emit("pro_status", { isPro: !!profile?.isPro, proExpiresAt: profile?.proExpiresAt || null });
-    }).catch((err) => {
-      console.error("[check_pro_status] Failed to hydrate profile:", err.message);
+    }).catch(() => {
       socket.emit("pro_status", { isPro: false });
     });
   });
@@ -1568,8 +1359,7 @@ io.on("connection", (socket) => {
         isPro: !!profile?.isPro,
         proExpiresAt: profile?.proExpiresAt || null,
       });
-    }).catch((err) => {
-      console.error("[set_user_pro] Failed to hydrate profile:", err.message);
+    }).catch(() => {
       socket.emit("pro_activated", {
         taskCount: count,
         resetAt,
@@ -1592,11 +1382,9 @@ io.on("connection", (socket) => {
       await deactivateUserPro(email);
       socket.emit("pro_deactivated");
     } catch (err) {
-      console.error("[deactivate_pro] Error:", err.message);
       socket.emit("pro_deactivate_error", "Failed to deactivate Pro.");
     }
   });
-
 
   socket.on("join_workspace", withSocketGuard(socket, "join_workspace", async (data = {}) => {
     const workspaceName = normalizeText(data.workspaceName);
@@ -1607,29 +1395,23 @@ io.on("connection", (socket) => {
     const rawEmail = data.userEmail ?? data.email ?? data?.user?.email ?? "";
     const email = normalizeEmail(rawEmail);
     const userName = explicitName || (email.includes("@") ? email.split("@")[0] : normalizeText(data.userName));
-    devLog(`[join_workspace] ${workspaceName} | creating=${isCreating}`);
+    
     const joinThrottle = allowSensitiveAttempt(scopeForEmail("join_workspace", email || workspaceName));
     if (!joinThrottle.allowed) {
       return socket.emit("error_msg", "Too many workspace attempts. Please wait a few minutes and try again.");
     }
-    devLog(`[join_workspace] ${userName} @ ${workspaceName}`);
+    
     if (!workspaceName || !password || !userName || !email) {
-      console.error(`[join_workspace] ✗ Missing required fields!`, { workspaceName: !!workspaceName, password: !!password, userName: !!userName, email: !!email });
       return socket.emit("error_msg", "Missing required fields.");
     }
 
     let existingWs = workspaces[workspaceName];
 
-
     if (!existingWs && !isCreating) {
-      console.log(`[join_workspace] Workspace not in memory, attempting to load from MongoDB...`);
       const loadedWs = await loadRoomFromDB(workspaceName);
       if (loadedWs) {
         workspaces[workspaceName] = loadedWs;
         existingWs = loadedWs;
-        console.log(`[join_workspace] ✓ Hydrated ${workspaceName} from MongoDB`);
-      } else {
-        console.log(`[join_workspace] ✗ Workspace not found in MongoDB either`);
       }
     }
 
@@ -1649,7 +1431,6 @@ io.on("connection", (socket) => {
           return socket.emit("error_msg", `Workspace "${workspaceName}" already exists with a different PIN. Choose a different name or use the correct PIN.`);
         }
         await upgradeWorkspacePinIfNeeded(existingWs, workspaceName, password);
-        devLog(`[join_workspace] joining existing workspace as admin`);
       } else {
         workspaces[workspaceName] = {
           password: await hashSecret(password),
@@ -1657,12 +1438,11 @@ io.on("connection", (socket) => {
           creatorEmail: email,
           isPro: false,
           proExpiresAt: null,
-          tasks:       [],
-          history:     [],
-          members:     [],
-          sockets:     new Map(),
+          tasks: [],
+          history: [],
+          members: [],
+          sockets: new Map(),
         };
-        devLog(`[join_workspace] created ${workspaceName}`);
         await saveRoomToDB(workspaceName);
       }
     }
@@ -1673,26 +1453,12 @@ io.on("connection", (socket) => {
     }
     const normalizedUserEmail = email;
     const storedCreatorEmail = normalizeEmail(ws.creatorEmail);
-    
-    console.log(`DEBUG: Role Assignment Check`);
-    console.log(`  User Email (normalized): "${normalizedUserEmail}"`);
-    console.log(`  Stored Creator Email:    "${storedCreatorEmail}"`);
-    console.log(`  isCreating flag:         ${isCreating}`);
-    console.log(`  Creator email exists:    ${!!storedCreatorEmail}`);
-    
 
     let role = "member";
     if (isCreating) {
       role = "admin";
-      console.log(`🎯 Role = ADMIN (isCreating=true)`);
     } else if (storedCreatorEmail && storedCreatorEmail === normalizedUserEmail) {
       role = "admin";
-      console.log(`🎯 Role = ADMIN (Email match found! "${normalizedUserEmail}" === "${storedCreatorEmail}")`);
-    } else {
-      console.log(`⚠️ Role = MEMBER (Emails do not match or storedCreatorEmail is empty)`);
-      if (!storedCreatorEmail) {
-        console.warn(`⚠️  WARNING: storedCreatorEmail is empty! This might cause issues on rejoin.`);
-      }
     }
 
     const joinedProfile = await getHydratedUserProfile(email);
@@ -1702,74 +1468,52 @@ io.on("connection", (socket) => {
 
     ws.sockets.set(socket.id, { name: userName, displayName: userName, role, email });
     socket.join(workspaceName);
-    // Clear any pending leave timers for this user (they may be reloading/reconnecting)
+
     try {
       const leaveKey = `${workspaceName}|${(email||"").toLowerCase()}`;
       const pending = pendingLeaveTimers.get(leaveKey);
       if (pending) { clearTimeout(pending); pendingLeaveTimers.delete(leaveKey); }
     } catch (err) {}
 
-    console.log(`[join_workspace] Added ${userName} to workspace. Total sockets in workspace: ${ws.sockets.size}`);
     const memberKey = email;
-    const existingMemberIndex = ws.members.findIndex(
-      m => normalizeEmail(m?.email) === memberKey
-    );
+    const existingMemberIndex = ws.members.findIndex(m => normalizeEmail(m?.email) === memberKey);
     
     if (existingMemberIndex !== -1) {
-
       const existingMember = ws.members[existingMemberIndex];
       if (existingMember.name !== userName) {
-        console.log(`[join_workspace] Updated member name: "${existingMember.name}" → "${userName}"`);
         existingMember.name = userName;
       }
       if (role === "admin") {
         existingMember.role = "admin";
       }
     } else {
-     
       ws.members.push({ name: userName, displayName: userName, role, email: memberKey, joinedAt: new Date().toISOString() });
     }
 
-    // join history entries removed to avoid noisy join/leave notifications
-
     await saveRoomToDB(workspaceName);
 
-    console.log('[DEBUG SOCKET EMIT load_workspace]', {
-      socketId: socket.id,
-      userEmail: joinedProfile?.email || email,
-      userIsPro: joinedUserIsPro,
-      roomIsPro: ws?.isPro,
-      mergedPayloadIsPro: joinedUserIsPro || ws?.isPro || false,
-    });
-
-    const refreshedUser = joinedProfile;
     const resolvedIsPro = !!(ws.isPro || joinedUserIsPro);
     const resolvedProExpiresAt = joinedUserProExpiresAt || ws.proExpiresAt || null;
     const { count, resetAt } = getUserTaskData(email);
 
     socket.emit("load_workspace", {
-      tasks:       ws.tasks,
+      tasks: ws.tasks,
       projectName: ws.projectName,
       role,
-      history:     ws.history,
-      members:     ws.members,
-      taskCount:   count,
+      history: ws.history,
+      members: ws.members,
+      taskCount: count,
       resetAt,
-      isPro:       resolvedIsPro,
+      isPro: resolvedIsPro,
       proExpiresAt: resolvedProExpiresAt,
     });
 
     broadcastUsers(workspaceName);
     broadcastMembers(workspaceName);
     socket.to(workspaceName).emit("history_update", ws.history);
-
-    console.log(`[join] ${userName} (${email}) → ${workspaceName} (${role})`);
   }));
 
   socket.on("rejoin_workspace", withSocketGuard(socket, "rejoin_workspace", async (data = {}) => {
-    console.log(`\n[rejoin_workspace] ════════════════════════════════════════════`);
-    console.log(`DEBUG: Full payload received:`, JSON.stringify(data, null, 2));
-    
     const workspaceName = normalizeText(data.workspaceName);
     const explicitName = normalizeText(data.name || data.userName);
     const rawEmail = data.userEmail ?? data.email ?? data?.user?.email ?? "";
@@ -1779,106 +1523,75 @@ io.on("connection", (socket) => {
     if (!rejoinThrottle.allowed) {
       return socket.emit("error_msg", "Too many reconnect attempts. Please wait a few minutes and try again.");
     }
-    console.log(`DEBUG: Extracted email from payload - Raw: "${rawEmail}" | Normalized: "${email}"`);
-    
-    console.log(`  User: ${userName} | Workspace: ${workspaceName} | Email: ${email} | SocketID: ${socket.id}`);
     
     if (!workspaceName || !userName || !email) {
-      console.error(`[rejoin_workspace] ✗ Missing required fields!`, { workspaceName: !!workspaceName, userName: !!userName, email: !!email });
       return socket.emit("error_msg", "Missing required fields for rejoin.");
     }
 
     let ws = workspaces[workspaceName];
-    console.log(`[rejoin_workspace] Workspace found in memory: ${!!ws}`);
-     if (!ws) {
-      console.log(`[rejoin_workspace] Workspace not in memory, attempting to load from MongoDB...`);
+    if (!ws) {
       const loadedWs = await loadRoomFromDB(workspaceName);
       if (loadedWs) {
         workspaces[workspaceName] = loadedWs;
         ws = loadedWs;
-        console.log(`[rejoin_workspace] ✓ Hydrated ${workspaceName} from MongoDB`);
       }
     }
     
     if (!ws) {
-      console.error(`[rejoin_workspace] Workspace "${workspaceName}" not found!`);
       return socket.emit("error_msg", `Workspace "${workspaceName}" not found.`);
     }
+
     const normalizedUserEmail = email;
     const storedCreatorEmail = normalizeEmail(ws.creatorEmail);
-    
-    console.log(`DEBUG: Role Assignment Check`);
-    console.log(`  User Email (normalized): "${normalizedUserEmail}"`);
-    console.log(`  Stored Creator Email:    "${storedCreatorEmail}"`);
-    console.log(`  Creator email exists:    ${!!storedCreatorEmail}`);
     
     let role = "member";
     if (storedCreatorEmail && storedCreatorEmail === normalizedUserEmail) {
       role = "admin";
-      console.log(`🎯 Role = ADMIN (Email match found! "${normalizedUserEmail}" === "${storedCreatorEmail}")`);
-    } else {
-      console.log(`⚠️ Role = MEMBER (Emails do not match or storedCreatorEmail is empty)`);
-      if (!storedCreatorEmail) {
-        console.warn(`⚠️  CRITICAL: storedCreatorEmail is EMPTY! Admin role cannot be restored on rejoin.`);
-      }
     }
+
     ws.sockets.set(socket.id, { name: userName, displayName: userName, role, email });
     socket.join(workspaceName);
-    // Clear any pending leave timers for this user (they may be reloading/reconnecting)
+
     try {
       const leaveKey = `${workspaceName}|${(email||"").toLowerCase()}`;
       const pending = pendingLeaveTimers.get(leaveKey);
       if (pending) { clearTimeout(pending); pendingLeaveTimers.delete(leaveKey); }
     } catch (err) {}
 
-    console.log(`[rejoin_workspace] Rejoined ${userName} to workspace. Total sockets: ${ws.sockets.size}`);
     const memberKey = email;
-    const existingMember = ws.members.find(
-      m => normalizeEmail(m?.email) === memberKey
-    );
+    const existingMember = ws.members.find(m => normalizeEmail(m?.email) === memberKey);
     if (existingMember && existingMember.name !== userName) {
-      console.log(`[rejoin_workspace] Updated member name: "${existingMember.name}" → "${userName}"`);
       existingMember.name = userName;
       existingMember.displayName = userName;
-       await saveRoomToDB(workspaceName);
+      await saveRoomToDB(workspaceName);
     }
+
     const joinedProfile = await getHydratedUserProfile(email);
     const { isPro: joinedUserIsPro, proExpiresAt: joinedUserProExpiresAt } = resolveActiveProState(joinedProfile ? { ...joinedProfile } : null);
     ws.isPro = !!(ws.isPro || joinedUserIsPro);
     ws.proExpiresAt = joinedUserProExpiresAt || ws.proExpiresAt || null;
     await saveRoomToDB(workspaceName);
 
-    console.log('[DEBUG SOCKET EMIT load_workspace]', {
-      socketId: socket.id,
-      userEmail: joinedProfile?.email || email,
-      userIsPro: joinedUserIsPro,
-      roomIsPro: ws?.isPro,
-      mergedPayloadIsPro: joinedUserIsPro || ws?.isPro || false,
-    });
-
-    const refreshedUser = joinedProfile;
     const resolvedIsPro = !!(ws.isPro || joinedUserIsPro);
     const resolvedProExpiresAt = joinedUserProExpiresAt || ws.proExpiresAt || null;
     const { count, resetAt } = getUserTaskData(email);
 
-    console.log(`[rejoin_workspace] Emitting load_workspace with taskCount=${count}, resetAt=${resetAt}, isPro=${resolvedIsPro}`);
     socket.emit("load_workspace", {
-      tasks:       ws.tasks,
+      tasks: ws.tasks,
       projectName: ws.projectName,
       role,
-      history:     ws.history,
-      members:     ws.members,
-      taskCount:   count,
+      history: ws.history,
+      members: ws.members,
+      taskCount: count,
       resetAt,
-      isPro:       resolvedIsPro,
+      isPro: resolvedIsPro,
       proExpiresAt: resolvedProExpiresAt,
     });
-    console.log(`[rejoin_workspace] load_workspace emitted successfully\n`);
 
     broadcastUsers(workspaceName);
     broadcastMembers(workspaceName);
-    socket.to(workspaceName).emit("history_update", ws.history);
   }));
+
   socket.on("update_tasks", withSocketGuard(socket, "update_tasks", async ({ workspaceName, updatedTasks, actionMeta, newTaskId } = {}) => {
     const safeWorkspaceName = normalizeText(workspaceName);
     const ws = workspaces[safeWorkspaceName];
@@ -1889,7 +1602,7 @@ io.on("connection", (socket) => {
     if (user.role !== "member" && user.role !== "admin") {
       return socket.emit("permission_denied", "Viewers cannot modify tasks.");
     }
-     const userRec = await ensureUserLoaded(user.email);
+
     const isNewTask = !!(newTaskId && user.email);
     if (isNewTask) {
       const userRec = await ensureUserLoaded(user.email);
@@ -1908,39 +1621,38 @@ io.on("connection", (socket) => {
     }
 
     ws.tasks = updatedTasks || [];
-     if (isNewTask) {
+    if (isNewTask) {
       const newCount = await incrementUserTaskCountAsync(user.email, newTaskId);
       const { resetAt } = getUserTaskData(user.email);
-      console.log(`[update_tasks] Emitting task_count_update: taskCount=${newCount}`);
       socket.emit("task_count_update", { taskCount: newCount, resetAt });
     }
 
     if (actionMeta) {
       pushHistory(ws, {
-        action:    actionMeta.action,
+        action: actionMeta.action,
         taskTitle: actionMeta.taskTitle || null,
         targetStatus: actionMeta.targetStatus || actionMeta.status || null,
-        userName:  user.name,
-        userRole:  user.role,
+        userName: user.name,
+        userRole: user.role,
         timestamp: new Date().toISOString(),
       });
     }
-     await saveRoomToDB(safeWorkspaceName);
+
+    await saveRoomToDB(safeWorkspaceName);
 
     socket.to(safeWorkspaceName).emit("receive_update", {
-      tasks:   ws.tasks,
+      tasks: ws.tasks,
       history: ws.history,
     });
 
-    // Broadcast history_update to other sockets (exclude the sender)
     socket.to(safeWorkspaceName).emit("history_update", ws.history);
   }));
+
   socket.on("check_task_limit", async ({ email } = {}) => {
     if (!email) return;
     const key = normalizeEmail(email);
     let ws_user = users[key];
-     if (!ws_user) {
-      console.log(`[check_task_limit] User ${key} not in memory, attempting to load...`);
+    if (!ws_user) {
       const dbUser = await loadUserFromDB(email);
       if (dbUser) {
         users[key] = {
@@ -1953,13 +1665,11 @@ io.on("connection", (socket) => {
           proPin: dbUser.proPin,
         };
         ws_user = users[key];
-        console.log(`[check_task_limit] ✓ Loaded user ${key} from MongoDB (taskCount: ${ws_user.taskCount})`);
       }
     }
     
     const { count, resetAt } = getUserTaskData(email);
     const limit = ws_user?.isPro ? PRO_TASK_LIMIT : FREE_TASK_LIMIT;
-    console.log(`[check_task_limit] ${key} | taskCount: ${count} | limit: ${limit} | canAdd: ${count < limit}`);
     socket.emit("task_limit_status", {
       taskCount: count,
       resetAt,
@@ -1968,7 +1678,8 @@ io.on("connection", (socket) => {
       canAdd: count < limit,
     });
   });
-   socket.on("typing_start", ({ workspaceName, context } = {}) => {
+
+  socket.on("typing_start", ({ workspaceName, context } = {}) => {
     const safeWorkspaceName = normalizeText(workspaceName);
     const ws = workspaces[safeWorkspaceName];
     if (!ws) return;
@@ -1985,9 +1696,8 @@ io.on("connection", (socket) => {
     if (!user) return;
     socket.to(safeWorkspaceName).emit("typing_clear", { name: user.name });
   });
-  // Use 'disconnecting' to schedule a delayed leave; this avoids false leaves on quick reloads
+
   socket.on("disconnecting", () => {
-    console.log(`[disconnecting] ${socket.id}`);
     for (const room of socket.rooms) {
       if (room === socket.id) continue;
       const ws = workspaces[room];
@@ -1995,7 +1705,6 @@ io.on("connection", (socket) => {
       const user = ws.sockets.get(socket.id);
       if (!user) continue;
 
-      // Schedule a delayed leave; if the user reconnects quickly we'll clear this timeout
       try {
         const leaveKey = `${room}|${(user.email||"").toLowerCase()}`;
         const existing = pendingLeaveTimers.get(leaveKey);
@@ -2008,27 +1717,22 @@ io.on("connection", (socket) => {
               (u) => (u.email || "").toLowerCase() === (user.email || "").toLowerCase()
             );
             if (!stillOnline) {
-              // left history entries removed to avoid noisy join/leave notifications
               saveRoomToDB(room);
-              socket.to(room).emit("history_update", ws.history);
             }
             broadcastUsers(room);
           } catch (err) {
-            console.error(`[disconnecting:timeout] Error processing leave for ${room}:`, err?.message || err);
           } finally {
             pendingLeaveTimers.delete(leaveKey);
           }
         }, 1000);
         pendingLeaveTimers.set(leaveKey, t);
-      } catch (err) {
-        console.error(`[disconnecting] Failed to schedule leave timer:`, err?.message || err);
-      }
+      } catch (err) {}
     }
   });
-   socket.on("delete_workspace", async ({ workspaceName, email } = {}) => {
+
+  socket.on("delete_workspace", async ({ workspaceName, email } = {}) => {
     const safeWorkspaceName = normalizeText(workspaceName);
     const safeEmail = normalizeEmail(email);
-    console.log(`[delete_workspace] User: ${safeEmail} | Workspace: ${safeWorkspaceName}`);
     const deleteThrottle = allowSensitiveAttempt(scopeForEmail("delete_workspace", safeEmail || safeWorkspaceName));
     if (!deleteThrottle.allowed) {
       return socket.emit("error_msg", "Too many delete attempts. Please wait a few minutes and try again.");
@@ -2043,23 +1747,21 @@ io.on("connection", (socket) => {
     if (!user || user.role !== "admin") {
       return socket.emit("error_msg", "Only admins can delete workspaces.");
     }
-     delete workspaces[safeWorkspaceName];
-    console.log(`[delete_workspace] ✓ Deleted ${safeWorkspaceName} from memory`);
-     if (mongoConnected) {
+
+    delete workspaces[safeWorkspaceName];
+    if (mongoConnected) {
       try {
         const collection = mongoose.connection.db.collection("workspaces");
         await collection.deleteOne({ workspaceName: safeWorkspaceName });
-        console.log(`[delete_workspace] ✓ Deleted ${safeWorkspaceName} from MongoDB`);
-      } catch (err) {
-        console.error(`[delete_workspace] Error deleting from DB:`, err.message);
-      }
+      } catch (err) {}
     }
-     io.to(safeWorkspaceName).emit("error_msg", `Workspace "${safeWorkspaceName}" has been deleted by admin.`);
+
+    io.to(safeWorkspaceName).emit("error_msg", `Workspace "${safeWorkspaceName}" has been deleted by admin.`);
     socket.leave(safeWorkspaceName);
-    
     socket.emit("workspace_deleted_success");
   });
-   socket.on("clear_history", async ({ workspaceName } = {}) => {
+
+  socket.on("clear_history", async ({ workspaceName } = {}) => {
     const safeWorkspaceName = normalizeText(workspaceName);
     const clearThrottle = allowSensitiveAttempt(scopeForEmail("clear_history", safeWorkspaceName));
     if (!clearThrottle.allowed) {
@@ -2074,22 +1776,17 @@ io.on("connection", (socket) => {
     ws.history = [];
     await saveRoomToDB(safeWorkspaceName);
     socket.to(safeWorkspaceName).emit("history_update", ws.history);
-    socket.emit("history_update", ws.history); // ← ENSURE sender gets it too
+    socket.emit("history_update", ws.history);
     socket.emit("history_cleared");
   });
 });
- const PORT = process.env.PORT || 3001;
 
-async function startServer() {
-   await connectDB();
-  
+const PORT = process.env.PORT || 3001;
+
+async function startServer() {   
+  await connectDB();
   server.listen(PORT, () => {
     console.log(`[Server] ✓ SyncBoard listening on :${PORT}`);
-    if (mongoConnected) {
-      console.log(`[Server] ✓ MongoDB persistence enabled`);
-    } else {
-      console.log(`[Server] ⚠️  MongoDB not available - running in memory-only mode`);
-    }
   });
 }
 
@@ -2103,7 +1800,6 @@ app.use((err, req, res, next) => {
   if (!origin || isOriginAllowed(origin, ALLOWED_ORIGINS)) {
     applyCorsHeaders(res, origin);
   }
-  console.error("[express] Unhandled error:", err);
   if (res.headersSent) {
     return next(err);
   }
