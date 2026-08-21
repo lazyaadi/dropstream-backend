@@ -77,8 +77,8 @@ app.use(cors({ origin: corsOrigin, credentials: true }));
 const server = http.createServer(app);
 const io = new Server(server, {
   maxHttpBufferSize: 1e7,
-  pingTimeout: 5000,
-  pingInterval: 10000,
+  pingTimeout: 20000,
+  pingInterval: 25000,
   cors: {
     origin: corsOrigin,
     methods: ["GET", "POST", "OPTIONS"],
