@@ -1139,7 +1139,7 @@ async function broadcastUsers(workspaceName) {
     const viewerEmail = viewer.email;
     const viewerEmailNorm = (viewerEmail || "").toLowerCase().trim();
     const viewerNameNorm = (viewer.name || "").trim();
-    const isPro = viewerEmail ? (proByEmail.get(viewerEmail) || false) : false;
+    const isPro = viewerEmailNorm ? (proByEmail.get(viewerEmailNorm) || false) : false;
 
     const isViewerSelf = (u) => {
       const ue = (u.email || "").toLowerCase().trim();
