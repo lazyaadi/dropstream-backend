@@ -1512,17 +1512,6 @@ io.on("connection", (socket) => {
 
     broadcastUsers(workspaceName);
     broadcastMembers(workspaceName);
-
-    pushHistory(ws, {
-      action: `${userName} joined the workspace`,
-      userName,
-      userRole: role,
-      timestamp: new Date().toISOString(),
-    });
-
-    socket.to(workspaceName).emit("history_update", ws.history);
-    socket.emit("history_update", ws.history);
-    socket.to(workspaceName).emit("user_joined", { name: userName, role, email });
   }));
 
   socket.on("rejoin_workspace", withSocketGuard(socket, "rejoin_workspace", async (data = {}) => {
@@ -1732,16 +1721,7 @@ io.on("connection", (socket) => {
         );
         
         if (!stillOnline) {
-          pushHistory(ws, {
-            action: `${user.name} left the workspace`,
-            userName: user.name,
-            userRole: user.role,
-            timestamp: new Date().toISOString(),
-          });
-
           saveRoomToDB(room);
-          socket.to(room).emit("history_update", ws.history);
-          socket.to(room).emit("user_left", { name: user.name, role: user.role, email: user.email });
         }
         
         broadcastUsers(room);
@@ -1749,7 +1729,7 @@ io.on("connection", (socket) => {
         console.error("[disconnecting] Error handling disconnect:", err);
       }
     }
-  });
+  });     
 
   socket.on("delete_workspace", async ({ workspaceName, email } = {}) => {
     const safeWorkspaceName = normalizeText(workspaceName);
