@@ -77,6 +77,8 @@ app.use(cors({ origin: corsOrigin, credentials: true }));
 const server = http.createServer(app);
 const io = new Server(server, {
   maxHttpBufferSize: 1e7,
+  pingTimeout: 5000,
+  pingInterval: 10000,
   cors: {
     origin: corsOrigin,
     methods: ["GET", "POST", "OPTIONS"],
@@ -1705,28 +1707,27 @@ io.on("connection", (socket) => {
       const user = ws.sockets.get(socket.id);
       if (!user) continue;
 
+     
+      ws.sockets.delete(socket.id);
+
       try {
         const leaveKey = `${room}|${(user.email||"").toLowerCase()}`;
         const existing = pendingLeaveTimers.get(leaveKey);
         if (existing) clearTimeout(existing);
-        const t = setTimeout(() => {
-          try {
-            if (ws.sockets.has(socket.id)) ws.sockets.delete(socket.id);
-            socket.to(room).emit("typing_clear", { name: user.name });
-            const stillOnline = Array.from(ws.sockets.values()).some(
-              (u) => (u.email || "").toLowerCase() === (user.email || "").toLowerCase()
-            );
-            if (!stillOnline) {
-              saveRoomToDB(room);
-            }
-            broadcastUsers(room);
-          } catch (err) {
-          } finally {
-            pendingLeaveTimers.delete(leaveKey);
-          }
-        }, 1000);
-        pendingLeaveTimers.set(leaveKey, t);
-      } catch (err) {}
+        
+        socket.to(room).emit("typing_clear", { name: user.name });
+        
+        const stillOnline = Array.from(ws.sockets.values()).some(
+          (u) => (u.email || "").toLowerCase() === (user.email || "").toLowerCase()
+        );
+        if (!stillOnline) {
+          saveRoomToDB(room);
+        }
+        
+        broadcastUsers(room);
+      } catch (err) {
+        console.error("[disconnecting] Error handling disconnect:", err);
+      }
     }
   });
 
