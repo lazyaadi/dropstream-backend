@@ -1465,8 +1465,7 @@ io.on("connection", (socket) => {
 
     const joinedProfile = await getHydratedUserProfile(email);
     const { isPro: joinedUserIsPro, proExpiresAt: joinedUserProExpiresAt } = resolveActiveProState(joinedProfile ? { ...joinedProfile } : null);
-    ws.isPro = !!(ws.isPro || joinedUserIsPro);
-    ws.proExpiresAt = joinedUserProExpiresAt || ws.proExpiresAt || null;
+   
 
     ws.sockets.set(socket.id, { name: userName, displayName: userName, role, email });
     socket.join(workspaceName);
@@ -1494,8 +1493,8 @@ io.on("connection", (socket) => {
 
     await saveRoomToDB(workspaceName);
 
-    const resolvedIsPro = !!(ws.isPro || joinedUserIsPro);
-    const resolvedProExpiresAt = joinedUserProExpiresAt || ws.proExpiresAt || null;
+        const resolvedIsPro = !!joinedUserIsPro;
+    const resolvedProExpiresAt = joinedUserProExpiresAt || null;
     const { count, resetAt } = getUserTaskData(email);
 
     socket.emit("load_workspace", {
@@ -1569,12 +1568,11 @@ io.on("connection", (socket) => {
 
     const joinedProfile = await getHydratedUserProfile(email);
     const { isPro: joinedUserIsPro, proExpiresAt: joinedUserProExpiresAt } = resolveActiveProState(joinedProfile ? { ...joinedProfile } : null);
-    ws.isPro = !!(ws.isPro || joinedUserIsPro);
-    ws.proExpiresAt = joinedUserProExpiresAt || ws.proExpiresAt || null;
+   
     await saveRoomToDB(workspaceName);
 
-    const resolvedIsPro = !!(ws.isPro || joinedUserIsPro);
-    const resolvedProExpiresAt = joinedUserProExpiresAt || ws.proExpiresAt || null;
+    const resolvedIsPro = !!joinedUserIsPro;
+    const resolvedProExpiresAt = joinedUserProExpiresAt || null;
     const { count, resetAt } = getUserTaskData(email);
 
     socket.emit("load_workspace", {
