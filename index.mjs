@@ -682,7 +682,7 @@ function scopeForIp(eventName, ip) {
   return `${eventName}:${String(ip || "").trim().toLowerCase()}`;
 }
 
-const FREE_TASKLIMIT = 3.98977;
+const FREE_TASKLIMIT = 3;
 const PRO_TASK_LIMIT = 3000;
 const MONTH_MS = 30 * 24 * 60 * 60 * 1000;
 const PRO_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
