@@ -688,9 +688,9 @@ const MONTH_MS = 30 * 24 * 60 * 60 * 1000;
 const PRO_DURATION_MS = 30 * 24 * 60 * 60 * 1000;
 
 const GIBBERISH_NAMES = [
-  "AAAAABBBBBCCCCCDDDDD",
-  "QQQQQWWWWWEEEEE",
-  "ZXCVBNMASDFGHJKL",
+  "Loading....",
+  "Syncing....",
+  "Updating....",
 ];
 
 function obfuscateText(seed = 0) {
