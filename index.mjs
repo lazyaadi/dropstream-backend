@@ -651,7 +651,38 @@ const users = {};
 
 const ATTEMPT_WINDOW_MS = 10 * 60 * 1000;
 const MAX_ATTEMPTS_PER_WINDOW = 8;
-const sensitiveAttemptBuckets = new Map();
+  const sensitiveAttemptBuckets = new Map();
+
+const JOIN_LOCKOUT_MS = 30 * 60 * 1000;
+const JOIN_MAX_FAILURES = 3;
+const joinFailureTracker = new Map();
+
+function getJoinLockoutState(scope) {
+  const rec = joinFailureTracker.get(scope);
+  if (!rec) return { locked: false, unlockAt: 0 };
+  if (rec.lockedUntil && rec.lockedUntil > Date.now()) {
+    return { locked: true, unlockAt: rec.lockedUntil };
+  }
+  if (rec.lockedUntil && rec.lockedUntil <= Date.now()) {
+    joinFailureTracker.delete(scope);
+  }
+  return { locked: false, unlockAt: 0 };
+}
+
+function registerJoinFailure(scope) {
+  const rec = joinFailureTracker.get(scope) || { count: 0, lockedUntil: null };
+  rec.count += 1;
+  if (rec.count >= JOIN_MAX_FAILURES) {
+    rec.lockedUntil = Date.now() + JOIN_LOCKOUT_MS;
+    rec.count = 0;
+  }
+  joinFailureTracker.set(scope, rec);
+  return rec.lockedUntil && rec.lockedUntil > Date.now() ? rec.lockedUntil : 0;
+}
+
+function clearJoinFailures(scope) {
+  joinFailureTracker.delete(scope);
+}
 
 function getAttemptBucket(scope) {
   const now = Date.now();
@@ -1398,6 +1429,12 @@ io.on("connection", (socket) => {
     const email = normalizeEmail(rawEmail);
     const userName = explicitName || (email.includes("@") ? email.split("@")[0] : normalizeText(data.userName));
     
+    const lockoutScope = email || workspaceName;
+    const lockoutState = getJoinLockoutState(lockoutScope);
+    if (lockoutState.locked) {
+      return socket.emit("join_locked_out", { unlockAt: lockoutState.unlockAt });
+    }
+
     const joinThrottle = allowSensitiveAttempt(scopeForEmail("join_workspace", email || workspaceName));
     if (!joinThrottle.allowed) {
       return socket.emit("error_msg", "Too many workspace attempts. Please wait a few minutes and try again.");
@@ -1405,6 +1442,9 @@ io.on("connection", (socket) => {
     
     if (!workspaceName || !password || !userName || !email) {
       return socket.emit("error_msg", "Missing required fields.");
+    }
+    if (isCreating && password.length < 8) {
+      return socket.emit("error_msg", "Password must be at least 8 characters.");
     }
 
     let existingWs = workspaces[workspaceName];
@@ -1419,10 +1459,14 @@ io.on("connection", (socket) => {
 
     if (!isCreating) {
       if (!existingWs) {
+        const unlockAt = registerJoinFailure(lockoutScope);
+        if (unlockAt) return socket.emit("join_locked_out", { unlockAt });
         return socket.emit("error_msg", `Workspace not found: "${workspaceName}" does not exist. Ask your admin for the correct workspace name, or create a new workspace.`);
       }
       if (!(await verifyWorkspacePin(password, existingWs.password))) {
-        return socket.emit("error_msg", `Wrong PIN for workspace "${workspaceName}". Ask your workspace admin for the correct 6-digit PIN.`);
+        const unlockAt = registerJoinFailure(lockoutScope);
+        if (unlockAt) return socket.emit("join_locked_out", { unlockAt });
+        return socket.emit("error_msg", `Wrong password for workspace "${workspaceName}". Ask your workspace admin for the correct password.`);
       }
       await upgradeWorkspacePinIfNeeded(existingWs, workspaceName, password);
     }
@@ -1430,7 +1474,7 @@ io.on("connection", (socket) => {
     if (isCreating) {
       if (existingWs) {
         if (!(await verifyWorkspacePin(password, existingWs.password))) {
-          return socket.emit("error_msg", `Workspace "${workspaceName}" already exists with a different PIN. Choose a different name or use the correct PIN.`);
+          return socket.emit("error_msg", `Workspace "${workspaceName}" already exists with a different password. Choose a different name or use the correct password.`);
         }
         await upgradeWorkspacePinIfNeeded(existingWs, workspaceName, password);
       } else {
@@ -1468,6 +1512,7 @@ io.on("connection", (socket) => {
    
 
     ws.sockets.set(socket.id, { name: userName, displayName: userName, role, email });
+    clearJoinFailures(lockoutScope);
     socket.join(workspaceName);
 
     try {
@@ -1729,6 +1774,22 @@ io.on("connection", (socket) => {
     }
   });     
 
+  socket.on("check_workspace_handle", withSocketGuard(socket, "check_workspace_handle", async ({ workspaceName } = {}) => {
+    const safeWorkspaceName = normalizeText(workspaceName).toLowerCase();
+    if (!safeWorkspaceName) {
+      return socket.emit("workspace_handle_status", { workspaceName: safeWorkspaceName, taken: false });
+    }
+    let taken = !!workspaces[safeWorkspaceName];
+    if (!taken && mongoConnected) {
+      try {
+        const collection = mongoose.connection.db.collection("workspaces");
+        const doc = await collection.findOne({ workspaceName: safeWorkspaceName }, { projection: { _id: 1 } });
+        taken = !!doc;
+      } catch {}
+    }
+    socket.emit("workspace_handle_status", { workspaceName: safeWorkspaceName, taken });
+  }));
+
   socket.on("delete_workspace", async ({ workspaceName, email } = {}) => {
     const safeWorkspaceName = normalizeText(workspaceName);
     const safeEmail = normalizeEmail(email);
@@ -1755,7 +1816,7 @@ io.on("connection", (socket) => {
       } catch (err) {}
     }
 
-    io.to(safeWorkspaceName).emit("error_msg", `Workspace "${safeWorkspaceName}" has been deleted by admin.`);
+    io.to(safeWorkspaceName).emit("error_msg", `This workspace is being deleted by an admin. You will be disconnected.`);
     socket.leave(safeWorkspaceName);
     socket.emit("workspace_deleted_success");
   });
