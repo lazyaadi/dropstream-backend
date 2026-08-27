@@ -1364,6 +1364,21 @@ io.on("connection", (socket) => {
     if (!pinOk) {
       return socket.emit("pro_activate_error", "Invalid or expired activation PIN.");
     }
+    const trimmedPin = String(proPin).trim();
+    if (mongoConnected) {
+      try {
+        const redemptions = mongoose.connection.db.collection("pro_pin_redemptions");
+        const existing = await redemptions.findOne({ pin: trimmedPin });
+        if (existing && existing.email !== key) {
+          return socket.emit("pro_activate_error", "Invalid or expired activation PIN.");
+        }
+        if (!existing) {
+          await redemptions.insertOne({ pin: trimmedPin, email: key, redeemedAt: new Date().toISOString() });
+        }
+      } catch {
+        // fail-open on a DB hiccup so a legit paying user isn't blocked by an outage
+      }
+    }
     if (!users[key]) {
       const dbUser = await loadUserFromDB(email);
       if (dbUser) {

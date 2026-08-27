@@ -164,7 +164,7 @@ export default {
      if (url.pathname === "/api/revoke-pin" && request.method === "POST") {
       if (!env?.PRO_PINS) return json({ error: "PRO_PINS KV not configured" }, 500);
       const { pin, secret } = await request.json();
-      if (secret !== env.ADMIN_SECRET) return json({ error: "Unauthorized" }, 401);
+      if (secret !== env.ADMSIN_SECRET) return json({ error: "Unauthorized" }, 401);
       const normalizedPin = pin.trim().toUpperCase();
       const stored = await env.PRO_PINS.get(normalizedPin);
       if (!stored) return json({ error: "PIN not found" }, 404);
