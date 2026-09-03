@@ -1010,14 +1010,14 @@ async function incrementUserTaskCountAsync(email, taskId) {
   return user.taskCount;
 }
 
-async function markUserPro(email, proPin) {
+async function markUserPro(email, proPin, expiresAtOverride) {
   const key = normalizeEmail(email);
   const user = users[key];
   if (!user) return false;
   user.isPro  = true;
   user.proPin = proPin;
   user.proActivatedAt = new Date().toISOString();
-  user.proExpiresAt = new Date(Date.now() + PRO_DURATION_MS).toISOString();
+  user.proExpiresAt = expiresAtOverride || new Date(Date.now() + PRO_DURATION_MS).toISOString();
 
   if (!mongoConnected) return true;
 
@@ -1365,16 +1365,27 @@ io.on("connection", (socket) => {
       return socket.emit("pro_activate_error", "Invalid or expired activation PIN.");
     }
     const trimmedPin = String(proPin).trim();
+    let lockedExpiresAt = null;
     if (mongoConnected) {
       try {
         const redemptions = mongoose.connection.db.collection("pro_pin_redemptions");
+        const newExpiresAt = new Date(Date.now() + PRO_DURATION_MS).toISOString();
         const insertResult = await redemptions.updateOne(
           { pin: trimmedPin },
-          { $setOnInsert: { pin: trimmedPin, email: key, redeemedAt: new Date().toISOString() } },
+          { $setOnInsert: { pin: trimmedPin, email: key, redeemedAt: new Date().toISOString(), expiresAt: newExpiresAt } },
           { upsert: true }
         );
-        if (!insertResult.upsertedId) {
-          return socket.emit("pro_activate_error", "This PIN has already been used and cannot be reused.");
+        if (insertResult.upsertedId) {
+          lockedExpiresAt = newExpiresAt;
+        } else {
+          const existing = await redemptions.findOne({ pin: trimmedPin });
+          if (!existing || existing.email !== key) {
+            return socket.emit("pro_activate_error", "This PIN is registered to a different account.");
+          }
+          if (new Date(existing.expiresAt).getTime() <= Date.now()) {
+            return socket.emit("pro_activate_error", "This PIN has expired after 30 days and can no longer be used.");
+          }
+          lockedExpiresAt = existing.expiresAt;
         }
       } catch {
         return socket.emit("pro_activate_error", "Could not verify PIN right now. Please try again.");
@@ -1399,7 +1410,7 @@ io.on("connection", (socket) => {
     if (!users[key]) {
       return socket.emit("pro_activate_error", "Account not found. Sign in first.");
     }
-    await markUserPro(email, String(proPin).trim());
+    await markUserPro(email, String(proPin).trim(), lockedExpiresAt);
     const { count, resetAt } = getUserTaskData(email);
     getHydratedUserProfile(email).then((profile) => {
       socket.emit("pro_activated", {
