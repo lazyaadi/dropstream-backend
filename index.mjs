@@ -1336,6 +1336,27 @@ io.on("connection", (socket) => {
     }
   });
 
+  socket.on("set_account_password", async ({ email, newPassword } = {}) => {
+    if (!email || !newPassword) {
+      return socket.emit("set_password_error", "Email and new password are required.");
+    }
+    if (String(newPassword).trim().length < 8) {
+      return socket.emit("set_password_error", "Password must be at least 8 characters.");
+    }
+    const key = normalizeEmail(email);
+    let user = users[key];
+    if (!user) {
+      const dbUser = await loadUserFromDB(email);
+      if (dbUser) { users[key] = { ...dbUser }; user = users[key]; }
+    }
+    if (!user) {
+      return socket.emit("set_password_error", "Account not found.");
+    }
+    user.passwordHash = await hashSecret(String(newPassword).trim());
+    await saveUserToDB(email);
+    socket.emit("set_password_success", "Password set. You can now log in with email and password.");
+  });
+
   socket.on("auth_google", async ({ credential, name } = {}) => {
     const tokenCheck = await verifyGoogleToken(credential);
     if (!tokenCheck.ok) {
