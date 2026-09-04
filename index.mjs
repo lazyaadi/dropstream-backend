@@ -362,8 +362,10 @@ async function connectDB() {
     ]);
     
     mongoConnected = true;
+    console.log("[connectDB] MongoDB connected successfully.");
   } catch (err) {
     mongoConnected = false;
+    console.error("[connectDB] MongoDB connection FAILED:", err.message);
   }
 }
 
@@ -1262,9 +1264,11 @@ io.on("connection", (socket) => {
       return socket.emit("auth_error", "Too many login attempts. Please wait a few minutes and try again.");
     }
     let existing = users[key];
+    console.log(`[auth_user] attempt for "${key}" | mongoConnected=${mongoConnected} | in-memory=${!!existing}`);
 
     if (!existing) {
       const dbUser = await loadUserFromDB(email);
+      console.log(`[auth_user] DB lookup for "${key}" → ${dbUser ? "found" : "NOT found"}`);
       if (dbUser) {
         users[key] = {
           name: dbUser.name,
@@ -1283,12 +1287,18 @@ io.on("connection", (socket) => {
 
     if (existing) {
       const result = await verifyLogin(email, password);
+      console.log(`[auth_user] verifyLogin for "${key}" → ok=${result.ok}${result.ok ? "" : ` reason=${result.reason}`}`);
       if (!result.ok) {
         if (result.reason === "wrong_password") {
+          const failCount = registerLoginFailure(key);
+          if (failCount >= LOGIN_MAX_FAILURES) {
+            return socket.emit("auth_error", "Forgot your password? Sign in with Google instead to access your account.");
+          }
           return socket.emit("auth_error", "Incorrect password for this email. Please try again.");
         }
         return socket.emit("auth_error", "Authentication failed.");
       }
+      clearLoginFailures(key);
       existing = result.user;
       if (name && name.trim() && name.trim() !== existing.name) {
         existing.name = name.trim();
