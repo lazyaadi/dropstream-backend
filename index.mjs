@@ -653,6 +653,21 @@ const ATTEMPT_WINDOW_MS = 10 * 60 * 1000;
 const MAX_ATTEMPTS_PER_WINDOW = 8;
   const sensitiveAttemptBuckets = new Map();
 
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const LOGIN_MAX_FAILURES = 3;
+const loginFailureTracker = new Map();
+
+function registerLoginFailure(key) {
+  const rec = loginFailureTracker.get(key) || { count: 0 };
+  rec.count += 1;
+  loginFailureTracker.set(key, rec);
+  return rec.count;
+}
+
+function clearLoginFailures(key) {
+  loginFailureTracker.delete(key);
+}
+
 const JOIN_LOCKOUT_MS = 30 * 60 * 1000;
 const JOIN_MAX_FAILURES = 3;
 const joinFailureTracker = new Map();
@@ -1237,6 +1252,9 @@ io.on("connection", (socket) => {
   socket.on("auth_user", async ({ email, password, name } = {}) => {
     if (!email || !password) {
       return socket.emit("auth_error", "Email and password are required.");
+    }
+    if (!EMAIL_RE.test(String(email).trim())) {
+      return socket.emit("auth_error", "Please enter a valid email address.");
     }
     const key = normalizeEmail(email);
     const authThrottle = allowSensitiveAttempt(scopeForEmail("auth_user", key));
