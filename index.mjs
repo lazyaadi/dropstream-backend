@@ -1583,9 +1583,19 @@ io.on("connection", (socket) => {
       role = "admin";
     }
 
-    const joinedProfile = await getHydratedUserProfile(email);
+     const joinedProfile = await getHydratedUserProfile(email);
     const { isPro: joinedUserIsPro, proExpiresAt: joinedUserProExpiresAt } = resolveActiveProState(joinedProfile ? { ...joinedProfile } : null);
-   
+
+    const prevWorkspace = socket.data.currentWorkspace;
+    if (prevWorkspace && prevWorkspace !== workspaceName) {
+      const prevWs = workspaces[prevWorkspace];
+      if (prevWs) {
+        prevWs.sockets.delete(socket.id);
+        socket.leave(prevWorkspace);
+        broadcastUsers(prevWorkspace);
+      }
+    }
+    socket.data.currentWorkspace = workspaceName;
 
     ws.sockets.set(socket.id, { name: userName, displayName: userName, role, email });
     clearJoinFailures(lockoutScope);
@@ -1669,6 +1679,17 @@ io.on("connection", (socket) => {
     if (storedCreatorEmail && storedCreatorEmail === normalizedUserEmail) {
       role = "admin";
     }
+
+    const prevWorkspace = socket.data.currentWorkspace;
+    if (prevWorkspace && prevWorkspace !== workspaceName) {
+      const prevWs = workspaces[prevWorkspace];
+      if (prevWs) {
+        prevWs.sockets.delete(socket.id);
+        socket.leave(prevWorkspace);
+        broadcastUsers(prevWorkspace);
+      }
+    }
+    socket.data.currentWorkspace = workspaceName;
 
     ws.sockets.set(socket.id, { name: userName, displayName: userName, role, email });
     socket.join(workspaceName);
