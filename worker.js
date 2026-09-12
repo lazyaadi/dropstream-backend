@@ -17,6 +17,9 @@ export default {
         headers: { ...cors, "Content-Type": "application/json" },
       });
 
+    const isAdminAuthorized = (request, env) =>
+      request.headers.get("X-Admin-Secret") === env.ADMIN_SECRET;
+
     try {
 
     const arrayBufferToBase64 = (buffer) => {
@@ -147,8 +150,8 @@ export default {
     }
      if (url.pathname === "/api/debug-pin" && request.method === "POST") {
       if (!env?.PRO_PINS) return json({ error: "PRO_PINS KV not configured" }, 500);
-      const { pin } = await request.json();
-      const normalizedPin = pin.trim().toUpperCase();
+      if (!isAdminAuthorized(request, env)) return json({ error: "Unauthorized" }, 401);
+      const { pin } = await request.json();      const normalizedPin = pin.trim().toUpperCase();
       const stored = await env.PRO_PINS.get(normalizedPin);
       return json({
         query:    normalizedPin,
@@ -156,15 +159,16 @@ export default {
         document: stored ? JSON.parse(stored) : null,
       });
     }
-     if (url.pathname === "/api/list-pins" && request.method === "GET") {
+    if (url.pathname === "/api/list-pins" && request.method === "GET") {
       if (!env?.PRO_PINS) return json({ error: "PRO_PINS KV not configured" }, 500);
+      if (!isAdminAuthorized(request, env)) return json({ error: "Unauthorized" }, 401);
       const list = await env.PRO_PINS.list();
       return json({ keys: list.keys });
     }
      if (url.pathname === "/api/revoke-pin" && request.method === "POST") {
       if (!env?.PRO_PINS) return json({ error: "PRO_PINS KV not configured" }, 500);
+      if (!isAdminAuthorized(request, env)) return json({ error: "Unauthorized" }, 401);
       const { pin, secret } = await request.json();
-      if (secret !== env.ADMSIN_SECRET) return json({ error: "Unauthorized" }, 401);
       const normalizedPin = pin.trim().toUpperCase();
       const stored = await env.PRO_PINS.get(normalizedPin);
       if (!stored) return json({ error: "PIN not found" }, 404);

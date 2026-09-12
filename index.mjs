@@ -257,7 +257,7 @@ app.post("/api/contact", async (req, res) => {
   const role = String(body.role || "").trim().slice(0, 40);
 
   const contactIp = (req.headers["x-forwarded-for"] || "").split(",")[0].trim() || req.socket.remoteAddress || "";
-  const contactThrottle = allowSensitiveAttempt(scopeForIp("contact", contactIp));
+  const contactThrottle = await allowSensitiveAttempt(scopeForIp("contact", contactIp));
   if (!contactThrottle.allowed) {
     return res.status(429).json({ error: "Too many contact requests. Please wait a few minutes and try again." });
   }
@@ -363,6 +363,14 @@ async function connectDB() {
     
     mongoConnected = true;
     console.log("[connectDB] MongoDB connected successfully.");
+    try {
+      await mongoose.connection.db.collection("rate_limits").createIndex(
+        { expiresAt: 1 },
+        { expireAfterSeconds: 0 }
+      );
+    } catch (idxErr) {
+      console.error("[connectDB] Failed to create rate_limits TTL index:", idxErr.message);
+    }
   } catch (err) {
     mongoConnected = false;
     console.error("[connectDB] MongoDB connection FAILED:", err.message);
@@ -653,73 +661,174 @@ const users = {};
 
 const ATTEMPT_WINDOW_MS = 10 * 60 * 1000;
 const MAX_ATTEMPTS_PER_WINDOW = 8;
-  const sensitiveAttemptBuckets = new Map();
+const sensitiveAttemptBucketsMemory = new Map(); // fallback only, used when Mongo is unavailable
 
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const LOGIN_MAX_FAILURES = 3;
-const loginFailureTracker = new Map();
-
-function registerLoginFailure(key) {
-  const rec = loginFailureTracker.get(key) || { count: 0 };
-  rec.count += 1;
-  loginFailureTracker.set(key, rec);
-  return rec.count;
-}
-
-function clearLoginFailures(key) {
-  loginFailureTracker.delete(key);
-}
+const LOGIN_FAILURE_TTL_MS = 24 * 60 * 60 * 1000;
+const loginFailureTrackerMemory = new Map(); // fallback only
 
 const JOIN_LOCKOUT_MS = 30 * 60 * 1000;
 const JOIN_MAX_FAILURES = 3;
-const joinFailureTracker = new Map();
+const JOIN_FAILURE_TTL_MS = JOIN_LOCKOUT_MS;
+const joinFailureTrackerMemory = new Map(); // fallback only
 
-function getJoinLockoutState(scope) {
-  const rec = joinFailureTracker.get(scope);
-  if (!rec) return { locked: false, unlockAt: 0 };
-  if (rec.lockedUntil && rec.lockedUntil > Date.now()) {
-    return { locked: true, unlockAt: rec.lockedUntil };
-  }
-  if (rec.lockedUntil && rec.lockedUntil <= Date.now()) {
-    joinFailureTracker.delete(scope);
-  }
-  return { locked: false, unlockAt: 0 };
+const RATE_LIMIT_COLLECTION = "rate_limits";
+function rateLimitCollection() {
+  return mongoConnected ? mongoose.connection.db.collection(RATE_LIMIT_COLLECTION) : null;
 }
 
-function registerJoinFailure(scope) {
-  const rec = joinFailureTracker.get(scope) || { count: 0, lockedUntil: null };
-  rec.count += 1;
-  if (rec.count >= JOIN_MAX_FAILURES) {
-    rec.lockedUntil = Date.now() + JOIN_LOCKOUT_MS;
-    rec.count = 0;
+async function registerLoginFailure(key) {
+  const col = rateLimitCollection();
+  if (!col) {
+    const rec = loginFailureTrackerMemory.get(key) || { count: 0 };
+    rec.count += 1;
+    loginFailureTrackerMemory.set(key, rec);
+    return rec.count;
   }
-  joinFailureTracker.set(scope, rec);
-  return rec.lockedUntil && rec.lockedUntil > Date.now() ? rec.lockedUntil : 0;
+  try {
+    const id = `login:${key}`;
+    const result = await col.findOneAndUpdate(
+      { _id: id },
+      { $inc: { count: 1 }, $setOnInsert: { expiresAt: new Date(Date.now() + LOGIN_FAILURE_TTL_MS) } },
+      { upsert: true, returnDocument: "after" }
+    );
+    return result.value.count;
+  } catch (err) {
+    console.error("[registerLoginFailure] Mongo error, falling back to memory:", err.message);
+    const rec = loginFailureTrackerMemory.get(key) || { count: 0 };
+    rec.count += 1;
+    loginFailureTrackerMemory.set(key, rec);
+    return rec.count;
+  }
 }
 
-function clearJoinFailures(scope) {
-  joinFailureTracker.delete(scope);
+async function clearLoginFailures(key) {
+  loginFailureTrackerMemory.delete(key);
+  const col = rateLimitCollection();
+  if (!col) return;
+  try {
+    await col.deleteOne({ _id: `login:${key}` });
+  } catch (err) {
+    console.error("[clearLoginFailures] Mongo error:", err.message);
+  }
 }
 
-function getAttemptBucket(scope) {
+async function getJoinLockoutState(scope) {
+  const col = rateLimitCollection();
+  if (!col) {
+    const rec = joinFailureTrackerMemory.get(scope);
+    if (!rec) return { locked: false, unlockAt: 0 };
+    if (rec.lockedUntil && rec.lockedUntil > Date.now()) return { locked: true, unlockAt: rec.lockedUntil };
+    if (rec.lockedUntil && rec.lockedUntil <= Date.now()) joinFailureTrackerMemory.delete(scope);
+    return { locked: false, unlockAt: 0 };
+  }
+  try {
+    const doc = await col.findOne({ _id: `join:${scope}` });
+    if (!doc || !doc.lockedUntil) return { locked: false, unlockAt: 0 };
+    if (doc.lockedUntil > Date.now()) return { locked: true, unlockAt: doc.lockedUntil };
+    return { locked: false, unlockAt: 0 };
+  } catch (err) {
+    console.error("[getJoinLockoutState] Mongo error:", err.message);
+    return { locked: false, unlockAt: 0 };
+  }
+}
+
+async function registerJoinFailure(scope) {
+  const col = rateLimitCollection();
+  if (!col) {
+    const rec = joinFailureTrackerMemory.get(scope) || { count: 0, lockedUntil: null };
+    rec.count += 1;
+    if (rec.count >= JOIN_MAX_FAILURES) {
+      rec.lockedUntil = Date.now() + JOIN_LOCKOUT_MS;
+      rec.count = 0;
+    }
+    joinFailureTrackerMemory.set(scope, rec);
+    return rec.lockedUntil && rec.lockedUntil > Date.now() ? rec.lockedUntil : 0;
+  }
+  try {
+    const id = `join:${scope}`;
+    const updated = await col.findOneAndUpdate(
+      { _id: id },
+      { $inc: { count: 1 }, $setOnInsert: { lockedUntil: null }, $set: { expiresAt: new Date(Date.now() + JOIN_FAILURE_TTL_MS) } },
+      { upsert: true, returnDocument: "after" }
+    );
+    const rec = updated.value;
+    if (rec.count >= JOIN_MAX_FAILURES && !rec.lockedUntil) {
+      const lockedUntil = Date.now() + JOIN_LOCKOUT_MS;
+      await col.updateOne({ _id: id }, { $set: { lockedUntil, count: 0, expiresAt: new Date(lockedUntil) } });
+      return lockedUntil;
+    }
+    return rec.lockedUntil && rec.lockedUntil > Date.now() ? rec.lockedUntil : 0;
+  } catch (err) {
+    console.error("[registerJoinFailure] Mongo error, falling back to memory:", err.message);
+    const rec = joinFailureTrackerMemory.get(scope) || { count: 0, lockedUntil: null };
+    rec.count += 1;
+    if (rec.count >= JOIN_MAX_FAILURES) {
+      rec.lockedUntil = Date.now() + JOIN_LOCKOUT_MS;
+      rec.count = 0;
+    }
+    joinFailureTrackerMemory.set(scope, rec);
+    return rec.lockedUntil && rec.lockedUntil > Date.now() ? rec.lockedUntil : 0;
+  }
+}
+
+async function clearJoinFailures(scope) {
+  joinFailureTrackerMemory.delete(scope);
+  const col = rateLimitCollection();
+  if (!col) return;
+  try {
+    await col.deleteOne({ _id: `join:${scope}` });
+  } catch (err) {
+    console.error("[clearJoinFailures] Mongo error:", err.message);
+  }
+}
+
+async function allowSensitiveAttempt(scope) {
   const now = Date.now();
-  const existing = sensitiveAttemptBuckets.get(scope);
-  if (!existing || existing.expiresAt <= now) {
-    const fresh = { count: 0, expiresAt: now + ATTEMPT_WINDOW_MS };
-    sensitiveAttemptBuckets.set(scope, fresh);
-    return fresh;
+  const col = rateLimitCollection();
+  if (!col) {
+    const existing = sensitiveAttemptBucketsMemory.get(scope);
+    let bucket = existing;
+    if (!existing || existing.expiresAt <= now) {
+      bucket = { count: 0, expiresAt: now + ATTEMPT_WINDOW_MS };
+      sensitiveAttemptBucketsMemory.set(scope, bucket);
+    }
+    if (bucket.count >= MAX_ATTEMPTS_PER_WINDOW) {
+      return { allowed: false, retryAfterMs: Math.max(0, bucket.expiresAt - now) };
+    }
+    bucket.count += 1;
+    return { allowed: true, retryAfterMs: 0 };
   }
-  return existing;
-}
-
-function allowSensitiveAttempt(scope) {
-  const bucket = getAttemptBucket(scope);
-  if (bucket.count >= MAX_ATTEMPTS_PER_WINDOW) {
-    return { allowed: false, retryAfterMs: Math.max(0, bucket.expiresAt - Date.now()) };
+  try {
+    const doc = await col.findOne({ _id: scope });
+    if (!doc || doc.expiresAt.getTime() <= now) {
+      await col.updateOne(
+        { _id: scope },
+        { $set: { count: 1, expiresAt: new Date(now + ATTEMPT_WINDOW_MS) } },
+        { upsert: true }
+      );
+      return { allowed: true, retryAfterMs: 0 };
+    }
+    if (doc.count >= MAX_ATTEMPTS_PER_WINDOW) {
+      return { allowed: false, retryAfterMs: Math.max(0, doc.expiresAt.getTime() - now) };
+    }
+    await col.updateOne({ _id: scope }, { $inc: { count: 1 } });
+    return { allowed: true, retryAfterMs: 0 };
+  } catch (err) {
+    console.error("[allowSensitiveAttempt] Mongo error, falling back to memory:", err.message);
+    const existing = sensitiveAttemptBucketsMemory.get(scope);
+    let bucket = existing;
+    if (!existing || existing.expiresAt <= now) {
+      bucket = { count: 0, expiresAt: now + ATTEMPT_WINDOW_MS };
+      sensitiveAttemptBucketsMemory.set(scope, bucket);
+    }
+    if (bucket.count >= MAX_ATTEMPTS_PER_WINDOW) {
+      return { allowed: false, retryAfterMs: Math.max(0, bucket.expiresAt - now) };
+    }
+    bucket.count += 1;
+    return { allowed: true, retryAfterMs: 0 };
   }
-
-  bucket.count += 1;
-  return { allowed: true, retryAfterMs: 0 };
 }
 
 function scopeForEmail(eventName, email) {
@@ -1259,7 +1368,7 @@ io.on("connection", (socket) => {
       return socket.emit("auth_error", "Please enter a valid email address.");
     }
     const key = normalizeEmail(email);
-    const authThrottle = allowSensitiveAttempt(scopeForEmail("auth_user", key));
+    const authThrottle = await allowSensitiveAttempt(scopeForEmail("auth_user", key));
     if (!authThrottle.allowed) {
       return socket.emit("auth_error", "Too many login attempts. Please wait a few minutes and try again.");
     }
@@ -1290,7 +1399,7 @@ io.on("connection", (socket) => {
       console.log(`[auth_user] verifyLogin for "${key}" → ok=${result.ok}${result.ok ? "" : ` reason=${result.reason}`}`);
       if (!result.ok) {
         if (result.reason === "wrong_password") {
-          const failCount = registerLoginFailure(key);
+          const failCount = await registerLoginFailure(key);
           if (failCount >= LOGIN_MAX_FAILURES) {
             return socket.emit("auth_error", "Forgot your password? Sign in with Google instead to access your account.");
           }
@@ -1298,7 +1407,7 @@ io.on("connection", (socket) => {
         }
         return socket.emit("auth_error", "Authentication failed.");
       }
-      clearLoginFailures(key);
+      await clearLoginFailures(key);
       existing = result.user;
       if (name && name.trim() && name.trim() !== existing.name) {
         existing.name = name.trim();
@@ -1364,7 +1473,7 @@ io.on("connection", (socket) => {
     }
 
     const key = normalizeEmail(tokenCheck.email);
-    const authThrottle = allowSensitiveAttempt(scopeForEmail("auth_google", key));
+    const authThrottle = await allowSensitiveAttempt(scopeForEmail("auth_google", key));
     if (!authThrottle.allowed) {
       return socket.emit("auth_google_error", "Too many login attempts. Please wait a few minutes and try again.");
     }
@@ -1377,13 +1486,13 @@ io.on("connection", (socket) => {
     }, "google");
   });
 
-  socket.on("auth_google_redirect_token", ({ token } = {}) => {
+  socket.on("auth_google_redirect_token", async ({ token } = {}) => {
     const verified = verifyGoogleRedirectPayload(token);
     if (!verified) {
       return socket.emit("auth_google_error", "Google sign-in could not be verified. Please try again.");
     }
 
-    const authThrottle = allowSensitiveAttempt(scopeForEmail("auth_google", verified.email));
+    const authThrottle = await allowSensitiveAttempt(scopeForEmail("auth_google", verified.email));
     if (!authThrottle.allowed) {
       return socket.emit("auth_google_error", "Too many login attempts. Please wait a few minutes and try again.");
     }
@@ -1405,7 +1514,7 @@ io.on("connection", (socket) => {
     if (!key || !proPin) {
       return socket.emit("pro_activate_error", "Valid email and activation PIN are required.");
     }
-    const proThrottle = allowSensitiveAttempt(scopeForEmail("set_user_pro", key));
+    const proThrottle = await allowSensitiveAttempt(scopeForEmail("set_user_pro", key));
     if (!proThrottle.allowed) {
       return socket.emit("pro_activate_error", "Too many activation attempts. Please wait a few minutes and try again.");
     }
@@ -1506,12 +1615,12 @@ io.on("connection", (socket) => {
     const userName = explicitName || (email.includes("@") ? email.split("@")[0] : normalizeText(data.userName));
     
     const lockoutScope = email || workspaceName;
-    const lockoutState = getJoinLockoutState(lockoutScope);
+    const lockoutState = await getJoinLockoutState(lockoutScope);
     if (lockoutState.locked) {
       return socket.emit("join_locked_out", { unlockAt: lockoutState.unlockAt });
     }
 
-    const joinThrottle = allowSensitiveAttempt(scopeForEmail("join_workspace", email || workspaceName));
+    const joinThrottle = await allowSensitiveAttempt(scopeForEmail("join_workspace", email || workspaceName));
     if (!joinThrottle.allowed) {
       return socket.emit("error_msg", "Too many workspace attempts. Please wait a few minutes and try again.");
     }
@@ -1532,21 +1641,19 @@ io.on("connection", (socket) => {
         existingWs = loadedWs;
       }
     }
-
-    if (!isCreating) {
+if (!isCreating) {
       if (!existingWs) {
-        const unlockAt = registerJoinFailure(lockoutScope);
+        const unlockAt = await registerJoinFailure(lockoutScope);
         if (unlockAt) return socket.emit("join_locked_out", { unlockAt });
         return socket.emit("error_msg", `Workspace not found: "${workspaceName}" does not exist. Ask your admin for the correct workspace name, or create a new workspace.`);
       }
       if (!(await verifyWorkspacePin(password, existingWs.password))) {
-        const unlockAt = registerJoinFailure(lockoutScope);
+        const unlockAt = await registerJoinFailure(lockoutScope);
         if (unlockAt) return socket.emit("join_locked_out", { unlockAt });
         return socket.emit("error_msg", `Wrong password for workspace "${workspaceName}". Ask your workspace admin for the correct password.`);
       }
       await upgradeWorkspacePinIfNeeded(existingWs, workspaceName, password);
     }
-
     if (isCreating) {
       if (existingWs) {
         if (!(await verifyWorkspacePin(password, existingWs.password))) {
@@ -1598,7 +1705,7 @@ io.on("connection", (socket) => {
     socket.data.currentWorkspace = workspaceName;
 
     ws.sockets.set(socket.id, { name: userName, displayName: userName, role, email });
-    clearJoinFailures(lockoutScope);
+    await clearJoinFailures(lockoutScope);
     socket.join(workspaceName);
 
     try {
@@ -1650,7 +1757,7 @@ io.on("connection", (socket) => {
     const rawEmail = data.userEmail ?? data.email ?? data?.user?.email ?? "";
     const email = normalizeEmail(rawEmail);
     const userName = explicitName || (email.includes("@") ? email.split("@")[0] : normalizeText(data.userName));
-    const rejoinThrottle = allowSensitiveAttempt(scopeForEmail("rejoin_workspace", email || workspaceName));
+    const rejoinThrottle = await allowSensitiveAttempt(scopeForEmail("rejoin_workspace", email || workspaceName));
     if (!rejoinThrottle.allowed) {
       return socket.emit("error_msg", "Too many reconnect attempts. Please wait a few minutes and try again.");
     }
@@ -1890,7 +1997,7 @@ io.on("connection", (socket) => {
   socket.on("delete_workspace", async ({ workspaceName, email } = {}) => {
     const safeWorkspaceName = normalizeText(workspaceName);
     const safeEmail = normalizeEmail(email);
-    const deleteThrottle = allowSensitiveAttempt(scopeForEmail("delete_workspace", safeEmail || safeWorkspaceName));
+    const deleteThrottle = await allowSensitiveAttempt(scopeForEmail("delete_workspace", safeEmail || safeWorkspaceName));
     if (!deleteThrottle.allowed) {
       return socket.emit("error_msg", "Too many delete attempts. Please wait a few minutes and try again.");
     }
@@ -1920,7 +2027,7 @@ io.on("connection", (socket) => {
 
   socket.on("clear_history", async ({ workspaceName } = {}) => {
     const safeWorkspaceName = normalizeText(workspaceName);
-    const clearThrottle = allowSensitiveAttempt(scopeForEmail("clear_history", safeWorkspaceName));
+    const clearThrottle = await allowSensitiveAttempt(scopeForEmail("clear_history", safeWorkspaceName));
     if (!clearThrottle.allowed) {
       return socket.emit("permission_denied", "Too many history actions. Please wait a few minutes and try again.");
     }
