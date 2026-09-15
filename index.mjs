@@ -691,7 +691,7 @@ async function registerLoginFailure(key) {
     const result = await col.findOneAndUpdate(
       { _id: id },
       { $inc: { count: 1 }, $setOnInsert: { expiresAt: new Date(Date.now() + LOGIN_FAILURE_TTL_MS) } },
-      { upsert: true, returnDocument: "after" }
+      { upsert: true, returnDocument: "after", includeResultMetadata: true }
     );
     return result.value.count;
   } catch (err) {
@@ -751,7 +751,7 @@ async function registerJoinFailure(scope) {
     const updated = await col.findOneAndUpdate(
       { _id: id },
       { $inc: { count: 1 }, $setOnInsert: { lockedUntil: null }, $set: { expiresAt: new Date(Date.now() + JOIN_FAILURE_TTL_MS) } },
-      { upsert: true, returnDocument: "after" }
+      { upsert: true, returnDocument: "after", includeResultMetadata: true }
     );
     const rec = updated.value;
     if (rec.count >= JOIN_MAX_FAILURES && !rec.lockedUntil) {
