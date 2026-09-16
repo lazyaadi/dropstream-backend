@@ -744,7 +744,11 @@ async function registerJoinFailure(scope) {
       rec.count = 0;
     }
     joinFailureTrackerMemory.set(scope, rec);
-    return rec.lockedUntil && rec.lockedUntil > Date.now() ? rec.lockedUntil : 0;
+    const isLocked = rec.lockedUntil && rec.lockedUntil > Date.now();
+    return {
+      unlockAt: isLocked ? rec.lockedUntil : 0,
+      attemptsRemaining: isLocked ? 0 : Math.max(0, JOIN_MAX_FAILURES - rec.count),
+    };
   }
   try {
     const id = `join:${scope}`;
@@ -757,9 +761,13 @@ async function registerJoinFailure(scope) {
     if (rec.count >= JOIN_MAX_FAILURES && !rec.lockedUntil) {
       const lockedUntil = Date.now() + JOIN_LOCKOUT_MS;
       await col.updateOne({ _id: id }, { $set: { lockedUntil, count: 0, expiresAt: new Date(lockedUntil) } });
-      return lockedUntil;
+      return { unlockAt: lockedUntil, attemptsRemaining: 0 };
     }
-    return rec.lockedUntil && rec.lockedUntil > Date.now() ? rec.lockedUntil : 0;
+    const isLocked = rec.lockedUntil && rec.lockedUntil > Date.now();
+    return {
+      unlockAt: isLocked ? rec.lockedUntil : 0,
+      attemptsRemaining: isLocked ? 0 : Math.max(0, JOIN_MAX_FAILURES - rec.count),
+    };
   } catch (err) {
     console.error("[registerJoinFailure] Mongo error, falling back to memory:", err.message);
     const rec = joinFailureTrackerMemory.get(scope) || { count: 0, lockedUntil: null };
@@ -769,7 +777,11 @@ async function registerJoinFailure(scope) {
       rec.count = 0;
     }
     joinFailureTrackerMemory.set(scope, rec);
-    return rec.lockedUntil && rec.lockedUntil > Date.now() ? rec.lockedUntil : 0;
+    const isLocked = rec.lockedUntil && rec.lockedUntil > Date.now();
+    return {
+      unlockAt: isLocked ? rec.lockedUntil : 0,
+      attemptsRemaining: isLocked ? 0 : Math.max(0, JOIN_MAX_FAILURES - rec.count),
+    };
   }
 }
 
@@ -1643,13 +1655,15 @@ io.on("connection", (socket) => {
     }
 if (!isCreating) {
       if (!existingWs) {
-        const unlockAt = await registerJoinFailure(lockoutScope);
+        const { unlockAt, attemptsRemaining } = await registerJoinFailure(lockoutScope);
         if (unlockAt) return socket.emit("join_locked_out", { unlockAt });
+        socket.emit("join_wrong_password", { attemptsRemaining });
         return socket.emit("error_msg", `Workspace not found: "${workspaceName}" does not exist. Ask your admin for the correct workspace name, or create a new workspace.`);
       }
       if (!(await verifyWorkspacePin(password, existingWs.password))) {
-        const unlockAt = await registerJoinFailure(lockoutScope);
+        const { unlockAt, attemptsRemaining } = await registerJoinFailure(lockoutScope);
         if (unlockAt) return socket.emit("join_locked_out", { unlockAt });
+        socket.emit("join_wrong_password", { attemptsRemaining });
         return socket.emit("error_msg", `Wrong password for workspace "${workspaceName}". Ask your workspace admin for the correct password.`);
       }
       await upgradeWorkspacePinIfNeeded(existingWs, workspaceName, password);
