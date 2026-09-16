@@ -1,4 +1,5 @@
 import bcrypt from "bcryptjs";
+import { createHmac } from "crypto";
 
 const BCRYPT_ROUNDS = 10;
 
@@ -94,4 +95,27 @@ export function isOriginAllowed(origin, allowed) {
   if (!origin) return true;
   if (allowed.includes("*")) return true;
   return allowed.includes(origin);
+}
+
+export function signToken(payload, secret) {
+  const body = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const sig = createHmac("sha256", secret).update(body).digest("base64url");
+  return `${body}.${sig}`;
+}
+
+export function verifyToken(token, secret) {
+  const raw = String(token || "").trim();
+  if (!raw) return null;
+  const parts = raw.split(".");
+  if (parts.length !== 2) return null;
+  const [body, sig] = parts;
+  const expected = createHmac("sha256", secret).update(body).digest("base64url");
+  if (sig !== expected) return null;
+  try {
+    const payload = JSON.parse(Buffer.from(body, "base64url").toString("utf8"));
+    if (payload?.exp && Date.now() > Number(payload.exp)) return null;
+    return payload;
+  } catch {
+    return null;
+  }
 }

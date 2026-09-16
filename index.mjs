@@ -16,6 +16,8 @@ import {
   maybeUpgradeWorkspacePin,
   parseAllowedOrigins,
   isOriginAllowed,
+  signToken,
+  verifyToken,
 } from "./security.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -26,6 +28,13 @@ const IS_DEV = process.env.NODE_ENV !== "production";
 const ALLOWED_ORIGINS = parseAllowedOrigins();
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
 const GOOGLE_REDIRECT_TOKEN_SECRET = process.env.GOOGLE_REDIRECT_TOKEN_SECRET || process.env.ADMIN_SECRET || "";
+const SESSION_SECRET = process.env.SESSION_SECRET || createHmac("sha256", `${Date.now()}`).update(`${Math.random()}`).digest("hex");
+if (!process.env.SESSION_SECRET) {
+  console.warn("[SESSION_SECRET] Not set — using a random per-process secret. Sessions will be invalidated on every restart until SESSION_SECRET is set.");
+}
+const SESSION_COOKIE_NAME = "sb_session";
+const SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
+const SESSION_TICKET_TTL_MS = 30 * 1000; // one-time exchange ticket, 30s
 const PRIMARY_CLIENT_URL = ALLOWED_ORIGINS[0] || "http://localhost:5173";
 const devLog = (...args) => { if (IS_DEV) console.log(...args); };
 
@@ -340,6 +349,24 @@ app.get(["/api/auth/me", "/api/user/profile"], async (req, res) => {
   } catch (err) {
     return res.status(500).json({ error: "Failed to load profile." });
   }
+});
+
+app.post("/api/session/exchange", async (req, res) => {
+  const ticket = String(req.body?.ticket || "").trim();
+  if (!ticket) {
+    return res.status(400).json({ error: "Missing ticket." });
+  }
+  const payload = verifyToken(ticket, SESSION_SECRET);
+  if (!payload?.email) {
+    return res.status(401).json({ error: "Invalid or expired ticket." });
+  }
+  setSessionCookie(res, payload.email);
+  return res.json({ ok: true });
+});
+
+app.post("/api/session/logout", async (req, res) => {
+  clearSessionCookie(res);
+  return res.json({ ok: true });
 });
 
 async function connectDB() {
@@ -975,6 +1002,48 @@ function verifyGoogleRedirectPayload(token) {
   }
 }
 
+function parseCookieHeader(header) {
+  const out = {};
+  String(header || "").split(";").forEach((pair) => {
+    const idx = pair.indexOf("=");
+    if (idx === -1) return;
+    const key = pair.slice(0, idx).trim();
+    const value = pair.slice(idx + 1).trim();
+    if (key) out[key] = decodeURIComponent(value);
+  });
+  return out;
+}
+
+function getVerifiedSessionEmail(cookieHeader) {
+  const cookies = parseCookieHeader(cookieHeader);
+  const raw = cookies[SESSION_COOKIE_NAME];
+  if (!raw) return null;
+  const payload = verifyToken(raw, SESSION_SECRET);
+  if (!payload?.email) return null;
+  return normalizeEmail(payload.email);
+}
+
+function issueSessionTicket(email) {
+  return signToken({ email: normalizeEmail(email), exp: Date.now() + SESSION_TICKET_TTL_MS }, SESSION_SECRET);
+}
+
+function setSessionCookie(res, email) {
+  const token = signToken({ email: normalizeEmail(email), exp: Date.now() + SESSION_TTL_MS }, SESSION_SECRET);
+  const parts = [
+    `${SESSION_COOKIE_NAME}=${encodeURIComponent(token)}`,
+    "Path=/",
+    "HttpOnly",
+    "Secure",
+    "SameSite=None",
+    `Max-Age=${Math.floor(SESSION_TTL_MS / 1000)}`,
+  ];
+  res.setHeader("Set-Cookie", parts.join("; "));
+}
+
+function clearSessionCookie(res) {
+  res.setHeader("Set-Cookie", `${SESSION_COOKIE_NAME}=; Path=/; HttpOnly; Secure; SameSite=None; Max-Age=0`);
+}
+
 function getClientRedirectUrl(req) {
   const origin = String(req.headers.origin || "").trim();
   if (origin && isOriginAllowed(origin, ALLOWED_ORIGINS)) return origin;
@@ -1022,6 +1091,7 @@ function finalizeGoogleAuth(socket, payload, source = "google") {
         taskCount: count,
         resetAt,
         proExpiresAt: profile?.proExpiresAt || null,
+        sessionTicket: issueSessionTicket(key),
       });
     }).catch(() => {
       socket.emit("auth_success", {
@@ -1031,6 +1101,7 @@ function finalizeGoogleAuth(socket, payload, source = "google") {
         taskCount: count,
         resetAt,
         proExpiresAt: userRecord.proExpiresAt || null,
+        sessionTicket: issueSessionTicket(key),
       });
     });
   };
@@ -1058,6 +1129,7 @@ function finalizeGoogleAuth(socket, payload, source = "google") {
       taskCount: 0,
       resetAt: null,
       proExpiresAt: null,
+      sessionTicket: issueSessionTicket(key),
     });
   };
 
@@ -1440,6 +1512,7 @@ io.on("connection", (socket) => {
         taskCount: count,
         resetAt,
         proExpiresAt: profile?.proExpiresAt || null,
+        sessionTicket: issueSessionTicket(key),
       });
     } else {
       if (!name || !name.trim()) {
@@ -1453,6 +1526,7 @@ io.on("connection", (socket) => {
         taskCount: 0,
         resetAt: null,
         proExpiresAt: null,
+        sessionTicket: issueSessionTicket(key),
       });
     }
   });
@@ -1749,6 +1823,8 @@ if (!isCreating) {
     const resolvedProExpiresAt = joinedUserProExpiresAt || null;
     const { count, resetAt } = getUserTaskData(email);
 
+    socket.emit("session_ticket", { ticket: issueSessionTicket(email) });
+
     socket.emit("load_workspace", {
       tasks: ws.tasks,
       projectName: ws.projectName,
@@ -1768,8 +1844,17 @@ if (!isCreating) {
   socket.on("rejoin_workspace", withSocketGuard(socket, "rejoin_workspace", async (data = {}) => {
     const workspaceName = normalizeText(data.workspaceName);
     const explicitName = normalizeText(data.name || data.userName);
-    const rawEmail = data.userEmail ?? data.email ?? data?.user?.email ?? "";
-    const email = normalizeEmail(rawEmail);
+    const claimedEmail = normalizeEmail(data.userEmail ?? data.email ?? data?.user?.email ?? "");
+
+    const verifiedEmail = getVerifiedSessionEmail(socket.handshake?.headers?.cookie || "");
+    if (!verifiedEmail) {
+      return socket.emit("session_expired", { reason: "no_session" });
+    }
+    if (claimedEmail && claimedEmail !== verifiedEmail) {
+      console.warn(`[rejoin_workspace] claimed email "${claimedEmail}" did not match session cookie "${verifiedEmail}" — using verified session.`);
+    }
+
+    const email = verifiedEmail;
     const userName = explicitName || (email.includes("@") ? email.split("@")[0] : normalizeText(data.userName));
     const rejoinThrottle = await allowSensitiveAttempt(scopeForEmail("rejoin_workspace", email || workspaceName));
     if (!rejoinThrottle.allowed) {
