@@ -335,9 +335,9 @@ const MONGO_URI = process.env.MONGO_URI;
 let mongoConnected = false;
 
 app.get(["/api/auth/me", "/api/user/profile"], async (req, res) => {
-  const email = String(req.query.email || req.headers["x-user-email"] || "").trim();
+  const email = getVerifiedSessionEmail(req.headers.cookie || "");
   if (!email) {
-    return res.status(400).json({ error: "Email is required." });
+    return res.status(401).json({ error: "Not authenticated." });
   }
 
   try {
