@@ -5,6 +5,7 @@ import cors     from "cors";
 import dotenv   from "dotenv";
 import mongoose from "mongoose";
 import rateLimit from "express-rate-limit";
+import helmet   from "helmet";
 import { createHmac } from "crypto";
 import { fileURLToPath } from "url";
 import { dirname, join } from "path";
@@ -47,6 +48,7 @@ process.on("uncaughtException", (err) => {
 });
 
 const app = express();
+app.use(helmet());
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 
