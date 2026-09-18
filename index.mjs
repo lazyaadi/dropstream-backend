@@ -1972,7 +1972,51 @@ if (!isCreating) {
       }
     }
 
-    ws.tasks = updatedTasks || [];
+    const MAX_TASKS_PER_BOARD = 500;
+    const MAX_TASK_TITLE_LEN = 200;
+    const MAX_TASK_DESC_LEN = 5000;
+
+    let truncatedTitleCount = 0;
+    let truncatedDescCount = 0;
+    let droppedInvalidCount = 0;
+
+    const sanitizeTask = (task) => {
+      if (!task || typeof task !== "object" || Array.isArray(task)) {
+        droppedInvalidCount++;
+        return null;
+      }
+
+      let title = task.title;
+      if (typeof title !== "string") {
+        title = "";
+      } else if (title.length > MAX_TASK_TITLE_LEN) {
+        title = title.slice(0, MAX_TASK_TITLE_LEN);
+        truncatedTitleCount++;
+      }
+
+      let description = task.description;
+      if (typeof description !== "string") {
+        description = "";
+      } else if (description.length > MAX_TASK_DESC_LEN) {
+        description = description.slice(0, MAX_TASK_DESC_LEN);
+        truncatedDescCount++;
+      }
+
+      return { ...task, title, description };
+    };
+
+    const rawTasks = Array.isArray(updatedTasks) ? updatedTasks : [];
+    const wasTaskListTooLong = rawTasks.length > MAX_TASKS_PER_BOARD;
+    ws.tasks = rawTasks.slice(0, MAX_TASKS_PER_BOARD).map(sanitizeTask).filter(Boolean);
+
+    if (truncatedTitleCount || truncatedDescCount || droppedInvalidCount || wasTaskListTooLong) {
+      socket.emit("task_field_truncated", {
+        truncatedTitleCount,
+        truncatedDescCount,
+        droppedInvalidCount,
+        taskListCapped: wasTaskListTooLong,
+      });
+    }
     if (isNewTask) {
       const newCount = await incrementUserTaskCountAsync(user.email, newTaskId);
       const { resetAt } = getUserTaskData(user.email);
