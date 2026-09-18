@@ -28,7 +28,10 @@ dotenv.config({ path: join(__dirname, ".env") });
 const IS_DEV = process.env.NODE_ENV !== "production";
 const ALLOWED_ORIGINS = parseAllowedOrigins();
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
-const GOOGLE_REDIRECT_TOKEN_SECRET = process.env.GOOGLE_REDIRECT_TOKEN_SECRET || process.env.ADMIN_SECRET || "";
+const GOOGLE_REDIRECT_TOKEN_SECRET = process.env.GOOGLE_REDIRECT_TOKEN_SECRET || createHmac("sha256", `${Date.now()}`).update(`${Math.random()}`).digest("hex");
+if (!process.env.GOOGLE_REDIRECT_TOKEN_SECRET) {
+  console.warn("[GOOGLE_REDIRECT_TOKEN_SECRET] Not set — using a random per-process secret. Google OAuth redirect tokens will be invalidated on every restart until GOOGLE_REDIRECT_TOKEN_SECRET is set.");
+}
 const SESSION_SECRET = process.env.SESSION_SECRET || createHmac("sha256", `${Date.now()}`).update(`${Math.random()}`).digest("hex");
 if (!process.env.SESSION_SECRET) {
   console.warn("[SESSION_SECRET] Not set — using a random per-process secret. Sessions will be invalidated on every restart until SESSION_SECRET is set.");
