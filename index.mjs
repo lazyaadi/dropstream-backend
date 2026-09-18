@@ -355,6 +355,7 @@ app.get(["/api/auth/me", "/api/user/profile"], async (req, res) => {
     return res.status(500).json({ error: "Failed to load profile." });
   }
 });
+ 
 
 app.post("/api/session/exchange", async (req, res) => {
   const ticket = String(req.body?.ticket || "").trim();
