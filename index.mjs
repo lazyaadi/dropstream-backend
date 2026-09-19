@@ -2037,12 +2037,12 @@ if (!isCreating) {
 
     await saveRoomToDB(safeWorkspaceName);
 
-    socket.to(safeWorkspaceName).emit("receive_update", {
+   io.to(safeWorkspaceName).emit("receive_update", {
       tasks: ws.tasks,
       history: ws.history,
     });
 
-    socket.to(safeWorkspaceName).emit("history_update", ws.history);
+    io.to(safeWorkspaceName).emit("history_update", ws.history);
   }));
 
   socket.on("check_task_limit", async ({ email } = {}) => {
