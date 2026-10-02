@@ -1976,6 +1976,20 @@ if (!isCreating) {
     const MAX_TASKS_PER_BOARD = 500;
     const MAX_TASK_TITLE_LEN = 200;
     const MAX_TASK_DESC_LEN = 5000;
+    const MAX_TASK_IMAGE_CHARS = Number(process.env.MAX_TASK_IMAGE_CHARS) || 2_000_000;
+    const MAX_BOARD_IMAGE_CHARS = Number(process.env.MAX_BOARD_IMAGE_CHARS) || 8_000_000;
+    const IMAGE_DATA_URL_RE = /^data:image\/(?:jpeg|png|webp);base64,[A-Za-z0-9+/]+={0,2}$/;
+
+    const existingImages = new Map();
+    for (const t of Array.isArray(ws.tasks) ? ws.tasks : []) {
+      if (t && typeof t.id === "string" && typeof t.image === "string" && t.image) {
+        existingImages.set(t.id, t.image);
+      }
+    }
+    let keptImageChars = 0;
+    const newImageCandidates = [];
+    console.log("[DEBUG #12] image limit =", MAX_TASK_IMAGE_CHARS);
+    const rejectedImages = { notPro: 0, badFormat: 0, tooLarge: 0, boardFull: 0 };
 
     let truncatedTitleCount = 0;
     let truncatedDescCount = 0;
@@ -2003,12 +2017,43 @@ if (!isCreating) {
         truncatedDescCount++;
       }
 
-      return { ...task, title, description };
+      const cleaned = { ...task, title, description, image: null };
+      const incomingImage = task.image;
+      if (typeof incomingImage === "string" && incomingImage) {
+        if (typeof task.id === "string" && existingImages.get(task.id) === incomingImage) {
+          cleaned.image = incomingImage;
+          keptImageChars += incomingImage.length;
+        } else {
+          newImageCandidates.push({ cleaned, image: incomingImage });
+        }
+      }
+      return cleaned;
     };
 
     const rawTasks = Array.isArray(updatedTasks) ? updatedTasks : [];
     const wasTaskListTooLong = rawTasks.length > MAX_TASKS_PER_BOARD;
-    ws.tasks = rawTasks.slice(0, MAX_TASKS_PER_BOARD).map(sanitizeTask).filter(Boolean);
+    const sanitizedTasks = rawTasks.slice(0, MAX_TASKS_PER_BOARD).map(sanitizeTask).filter(Boolean);
+
+    if (newImageCandidates.length) {
+      let senderIsPro = false;
+      if (user.email) {
+        const senderRec = await ensureUserLoaded(user.email);
+        senderIsPro = !!senderRec?.isPro;
+      }
+      let boardImageChars = keptImageChars;
+      for (const { cleaned, image } of newImageCandidates) {
+        if (!senderIsPro) { rejectedImages.notPro++; continue; }
+        if (image.length > MAX_TASK_IMAGE_CHARS) { rejectedImages.tooLarge++; continue; }
+        if (!IMAGE_DATA_URL_RE.test(image)) { rejectedImages.badFormat++; continue; }
+        if (boardImageChars + image.length > MAX_BOARD_IMAGE_CHARS) { rejectedImages.boardFull++; continue; }
+        boardImageChars += image.length;
+        cleaned.image = image;
+      }
+      const totalRejected = Object.values(rejectedImages).reduce((a, b) => a + b, 0);
+      if (totalRejected) socket.emit("task_image_rejected", rejectedImages);
+    }
+
+    ws.tasks = sanitizedTasks;
 
     if (truncatedTitleCount || truncatedDescCount || droppedInvalidCount || wasTaskListTooLong) {
       socket.emit("task_field_truncated", {
