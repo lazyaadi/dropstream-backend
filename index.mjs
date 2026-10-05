@@ -1862,11 +1862,6 @@ if (!isCreating) {
 
     const email = verifiedEmail;
     const userName = explicitName || (email.includes("@") ? email.split("@")[0] : normalizeText(data.userName));
-    const rejoinThrottle = await allowSensitiveAttempt(scopeForEmail("rejoin_workspace", email || workspaceName));
-    if (!rejoinThrottle.allowed) {
-      return socket.emit("error_msg", "Too many reconnect attempts. Please wait a few minutes and try again.");
-    }
-    
     if (!workspaceName || !userName || !email) {
       return socket.emit("error_msg", "Missing required fields for rejoin.");
     }
@@ -1880,12 +1875,20 @@ if (!isCreating) {
       }
     }
     
-    if (!ws) {
+    const normalizedUserEmail = email;
+    const storedCreatorEmail = normalizeEmail(ws?.creatorEmail);
+    const isKnownMember = !!ws && (
+      (storedCreatorEmail && storedCreatorEmail === normalizedUserEmail) ||
+      (Array.isArray(ws.members) && ws.members.some(m => normalizeEmail(m?.email) === normalizedUserEmail))
+    );
+
+    if (!ws || !isKnownMember) {
+      const failThrottle = await allowSensitiveAttempt(scopeForEmail("rejoin_workspace", email));
+      if (!failThrottle.allowed) {
+        return socket.emit("error_msg", "Too many reconnect attempts. Please wait a few minutes and try again.");
+      }
       return socket.emit("error_msg", `Workspace "${workspaceName}" not found.`);
     }
-
-    const normalizedUserEmail = email;
-    const storedCreatorEmail = normalizeEmail(ws.creatorEmail);
     
     let role = "member";
     if (storedCreatorEmail && storedCreatorEmail === normalizedUserEmail) {
