@@ -1988,7 +1988,6 @@ if (!isCreating) {
     }
     let keptImageChars = 0;
     const newImageCandidates = [];
-    console.log("[DEBUG #12] image limit =", MAX_TASK_IMAGE_CHARS);
     const rejectedImages = { notPro: 0, badFormat: 0, tooLarge: 0, boardFull: 0 };
 
     let truncatedTitleCount = 0;
