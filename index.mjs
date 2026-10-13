@@ -20,6 +20,8 @@ import {
   signToken,
   verifyToken,
 } from "./security.mjs";
+import { buildBoardContext } from "./boardContext.mjs";
+import { askGemini } from "./gemini.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -2239,6 +2241,159 @@ if (!isCreating) {
     socket.emit("history_update", ws.history);
     socket.emit("history_cleared");
   });
+});
+
+
+// ───────────── AI chat (Gemini, read-only) ─────────────
+const AI_PER_MIN = Number(process.env.AI_PER_MIN) || 6;
+const AI_PER_DAY = Number(process.env.AI_PER_DAY) || 40;
+const AI_GLOBAL_PER_DAY = Number(process.env.AI_GLOBAL_PER_DAY) || 400; // protects the shared free-tier key
+const AI_MAX_MESSAGE_CHARS = 1000;
+const AI_MAX_HISTORY = 10;
+const AI_MAX_HISTORY_CHARS = 2000;
+const aiWindowMemory = new Map(); // fallback only, used when Mongo is unavailable
+
+// Fixed-window counter in the rate_limits collection (atomic upsert, TTL-cleaned).
+async function countWindowedAction(scope, windowMs, max) {
+  const now = Date.now();
+  const bucket = Math.floor(now / windowMs);
+  const id = `${scope}:${bucket}`;
+  const windowEnd = (bucket + 1) * windowMs;
+  const retryAfterMs = Math.max(0, windowEnd - now);
+  const col = rateLimitCollection();
+  if (col) {
+    try {
+      const opts = { upsert: true, returnDocument: "after", includeResultMetadata: true };
+      let result;
+      try {
+        result = await col.findOneAndUpdate(
+          { _id: id },
+          { $inc: { count: 1 }, $setOnInsert: { expiresAt: new Date(windowEnd + 60 * 1000) } },
+          opts
+        );
+      } catch (e) {
+        if (e?.code !== 11000) throw e; // two first-requests raced on insert: just increment
+        result = await col.findOneAndUpdate({ _id: id }, { $inc: { count: 1 } }, { returnDocument: "after", includeResultMetadata: true });
+      }
+      const count = result?.value?.count ?? 1;
+      return { allowed: count <= max, retryAfterMs };
+    } catch (err) {
+      console.error("[countWindowedAction] Mongo error, falling back to memory:", err.message);
+    }
+  }
+  if (aiWindowMemory.size > 5000) aiWindowMemory.clear();
+  const count = (aiWindowMemory.get(id) || 0) + 1;
+  aiWindowMemory.set(id, count);
+  return { allowed: count <= max, retryAfterMs };
+}
+
+app.post("/api/ai/chat", async (req, res) => {
+  try {
+    // 1) Auth
+    const email = getVerifiedSessionEmail(req.headers.cookie || "");
+    if (!email) return res.status(401).json({ error: "Not authenticated." });
+
+    // 2) Input validation
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const workspaceName = typeof body.workspaceName === "string" ? normalizeText(body.workspaceName) : "";
+    const message = typeof body.message === "string" ? body.message.trim() : "";
+    if (!workspaceName || workspaceName.length > 100) return res.status(400).json({ error: "Invalid workspace." });
+    if (!message) return res.status(400).json({ error: "Message is empty." });
+    if (message.length > AI_MAX_MESSAGE_CHARS) {
+      return res.status(400).json({ error: `Message too long (max ${AI_MAX_MESSAGE_CHARS} characters).` });
+    }
+    if (body.history !== undefined && !Array.isArray(body.history)) {
+      return res.status(400).json({ error: "Invalid history." });
+    }
+    const history = [];
+    for (const h of (body.history || []).slice(-AI_MAX_HISTORY)) {
+      if (!h || typeof h !== "object" || typeof h.text !== "string") continue;
+      const role = h.role === "user" ? "user" : h.role === "assistant" || h.role === "model" ? "model" : null;
+      const text = h.text.trim().slice(0, AI_MAX_HISTORY_CHARS);
+      if (role && text) history.push({ role, text });
+    }
+    while (history.length && history[0].role !== "user") history.shift();
+
+    // 3) Membership: only a workspace the user belongs to is ever read
+    let ws = workspaces[workspaceName];
+    if (!ws) {
+      const loaded = await loadRoomFromDB(workspaceName);
+      if (loaded) {
+        workspaces[workspaceName] = loaded;
+        ws = loaded;
+      }
+    }
+    const creatorEmail = normalizeEmail(ws?.creatorEmail);
+    const isMember = !!ws && (
+      (creatorEmail && creatorEmail === email) ||
+      (Array.isArray(ws.members) && ws.members.some((m) => normalizeEmail(m?.email) === email))
+    );
+    if (!isMember) return res.status(403).json({ error: "You are not a member of this workspace." });
+
+    // 4) Rate limits: per minute, per day, then global
+    const minute = await countWindowedAction(`ai_min:${email}`, 60 * 1000, AI_PER_MIN);
+    if (!minute.allowed) {
+      const retryAfterSec = Math.ceil(minute.retryAfterMs / 1000);
+      res.set("Retry-After", String(retryAfterSec));
+      return res.status(429).json({ code: "rate_minute", error: "You're sending messages too fast. Wait a moment and try again.", retryAfterSec });
+    }
+    const day = await countWindowedAction(`ai_day:${email}`, 24 * 60 * 60 * 1000, AI_PER_DAY);
+    if (!day.allowed) {
+      return res.status(429).json({ code: "rate_daily", error: "You've reached today's AI limit. Try again tomorrow." });
+    }
+    const global = await countWindowedAction("ai_day_global", 24 * 60 * 60 * 1000, AI_GLOBAL_PER_DAY);
+    if (!global.allowed) {
+      return res.status(429).json({ code: "rate_global", error: "The AI assistant has reached its daily capacity. Try again tomorrow." });
+    }
+
+    // 5) Build context (client may send its local date; accepted only if within 1 day of server date)
+    const serverToday = new Date().toISOString().slice(0, 10);
+    let today = serverToday;
+    if (typeof body.today === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.today)) {
+      const diffDays = Math.abs(Date.parse(body.today + "T00:00:00Z") - Date.parse(serverToday + "T00:00:00Z")) / 86400000;
+      if (diffDays <= 1) today = body.today;
+    }
+        let isPro = false;
+    let planUnknown = false;
+    try {
+      const profile = await getHydratedUserProfile(email);
+      if (!profile) planUnknown = true; // user record not found / DB problem
+      isPro = profile?.isPro === true;
+    } catch {
+      planUnknown = true; // treat as Free, but tell the AI the plan is unverified
+    }
+    const team = isPro
+      ? {
+          members: getValidWorkspaceMembers(ws).map((m) => ({ name: m.displayName || m.name, role: m.role })),
+          online: getValidOnlineMembers(ws).map((u) => ({ name: u.name, role: u.role })),
+        }
+      : null;
+    const boardContext = buildBoardContext(ws, today, { isPro, team, planUnknown });
+
+    // 6) Ask Gemini
+    try {
+      const reply = await askGemini({ boardContext, history, message });
+      return res.json({ ok: true, reply });
+    } catch (err) {
+      console.error("[ai/chat] AI error:", err?.code || err?.message);
+      switch (err?.code) {
+        case "quota":
+          return res.status(429).json({ code: "provider_quota", error: "The AI is busy right now (free-tier limit reached). Try again in a minute." });
+        case "timeout":
+          return res.status(504).json({ error: "The AI took too long to answer. Try again." });
+        case "blocked":
+        case "too_long":
+          return res.status(422).json({ error: "The AI couldn't answer that. Try a shorter or more specific question." });
+        case "not_configured":
+          return res.status(503).json({ error: "The AI assistant isn't set up on the server yet." });
+        default:
+          return res.status(502).json({ error: "The AI service had a problem. Try again shortly." });
+      }
+    }
+  } catch (err) {
+    console.error("[ai/chat] Unexpected error:", err?.message);
+    return res.status(500).json({ error: "Something went wrong." });
+  }
 });
 
 const PORT = process.env.PORT || 3001;
