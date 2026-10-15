@@ -2368,11 +2368,17 @@ app.post("/api/ai/chat", async (req, res) => {
           online: getValidOnlineMembers(ws).map((u) => ({ name: u.name, role: u.role })),
         }
       : null;
-    const boardContext = buildBoardContext(ws, today, { isPro, team, planUnknown });
+    const boardContext = buildBoardContext(ws, today, {
+      isPro,
+      team,
+      planUnknown,
+      tz: typeof body.tz === "string" ? body.tz : "UTC",
+    });
 
     // 6) Ask Gemini
     try {
-      const reply = await askGemini({ boardContext, history, message });
+      const plan = planUnknown ? "unknown" : isPro ? "Pro" : "Free";
+      const reply = await askGemini({ boardContext, history, message, plan });
       return res.json({ ok: true, reply });
     } catch (err) {
       console.error("[ai/chat] AI error:", err?.code || err?.message);

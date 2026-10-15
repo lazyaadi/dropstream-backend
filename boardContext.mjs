@@ -28,11 +28,29 @@ function dateOnly(value) {
   return Number.isNaN(Date.parse(m[1] + "T00:00:00Z")) ? null : m[1];
 }
 
-function dateTime(value) {
+// Only accepts a real IANA zone (e.g. "Asia/Karachi"); anything else falls back to UTC.
+function safeTimeZone(tz) {
+  if (typeof tz !== "string" || tz.length > 64) return "UTC";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    return tz;
+  } catch {
+    return "UTC";
+  }
+}
+
+function dateTime(value, tz = "UTC") {
   if (typeof value !== "string") return null;
   const t = Date.parse(value);
   if (Number.isNaN(t)) return null;
-  return new Date(t).toISOString().slice(0, 16).replace("T", " ") + " UTC";
+  const p = Object.fromEntries(
+    new Intl.DateTimeFormat("en-CA", {
+      timeZone: tz,
+      year: "numeric", month: "2-digit", day: "2-digit",
+      hour: "2-digit", minute: "2-digit", hourCycle: "h23",
+    }).formatToParts(new Date(t)).map((x) => [x.type, x.value])
+  );
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
 }
 
 function dayDiff(a, b) {
@@ -54,13 +72,13 @@ function formatTask(t, n) {
 }
 
 // Pro only. Newest first, max 10. Same data the Log panel shows.
-function buildActivityLines(history) {
+function buildActivityLines(history, tz) {
   const list = Array.isArray(history) ? history : [];
   return list
     .filter((h) => h && typeof h === "object")
     .map((h) => ({
       ms: Date.parse(h.timestamp),
-      when: dateTime(h.timestamp),
+      when: dateTime(h.timestamp, tz),
       who: clean(h.userName, 40),
       what: clean(h.action, 150),
     }))
@@ -83,8 +101,9 @@ function buildTeamLines(team) {
   ];
 }
 
-export function buildBoardContext(ws, todayISO, { isPro = false, team = null, planUnknown = false } = {}) {
+export function buildBoardContext(ws, todayISO, { isPro = false, team = null, planUnknown = false, tz = "UTC" } = {}) {
   const today = dateOnly(todayISO) || new Date().toISOString().slice(0, 10);
+  const zone = safeTimeZone(tz);
   const rawTasks = Array.isArray(ws?.tasks) ? ws.tasks : [];
 
   const tasks = rawTasks
@@ -105,7 +124,7 @@ export function buildBoardContext(ws, todayISO, { isPro = false, team = null, pl
         isDone,
         overdue: !isDone && daysLeft !== null && daysLeft < 0,
         createdBy: isPro ? clean(t.creatorName || t.addedBy, 40) : "",
-        createdAt: dateTime(t.createdAt),
+        createdAt: dateTime(t.createdAt, zone),
         createdMs: Number.isNaN(Date.parse(t.createdAt)) ? 0 : Date.parse(t.createdAt),
         completedBy: isPro ? clean(t.completedBy, 40) : "",        
         completedAt: dateOnly(t.completedAt),
@@ -135,11 +154,12 @@ export function buildBoardContext(ws, todayISO, { isPro = false, team = null, pl
 
   const newest = tasks.reduce((best, t) => (t.createdMs > (best?.createdMs || 0) ? t : best), null);
 
-   const activity = isPro ? buildActivityLines(ws?.history) : [];
+   const activity = isPro ? buildActivityLines(ws?.history, zone) : [];
 
   let out = [
     `Board: "${clean(ws?.projectName, 80) || "Untitled"}"`,
     `Today: ${today}`,
+    `All times below are in the user's local time zone (${zone}).`,
     `Columns: To Do, In Progress, Done`,
     `Counts: total ${counts.total} | To Do ${counts.todo} | In Progress ${counts["in-progress"]} | Done ${counts.done}` +
       (counts.unknown ? ` | Unknown status ${counts.unknown}` : "") +
