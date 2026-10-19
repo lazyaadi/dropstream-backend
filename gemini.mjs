@@ -4,6 +4,38 @@
 const DEFAULT_MODEL = "gemini-3.5-flash-lite";
 const TIMEOUT_MS = 20000;
 const MAX_OUTPUT_TOKENS = 800;
+const MAX_MOVES = 5; // keep equal to the cap in index.mjs
+
+const MOVE_TOOL = {
+  name: "propose_move_tasks",
+  description:
+    "Propose moving one or more tasks (max 5) to other columns, in the exact order the user asked. This only shows a Confirm button to the user; nothing moves until they press it.",
+  parameters: {
+    type: "OBJECT",
+    properties: {
+      moves: {
+        type: "ARRAY",
+        description: "The moves, in the order the user mentioned them. At most 5. Each task at most once.",
+        items: {
+          type: "OBJECT",
+          properties: {
+            taskNumber: {
+              type: "INTEGER",
+              description: "The number of the task in the Tasks list, exactly as numbered there.",
+            },
+            targetStatus: {
+              type: "STRING",
+              enum: ["todo", "in-progress", "done"],
+              description: "Destination column.",
+            },
+          },
+          required: ["taskNumber", "targetStatus"],
+        },
+      },
+    },
+    required: ["moves"],
+  },
+};
 
 const MOVE_TOOL = {
   name: "propose_move_task",
@@ -47,8 +79,8 @@ function buildSystemPrompt(boardContext, plan, canPropose = false) {
      "- If a detail is not in the data (for example an exact time), say plainly that the data doesn't include it and why, never guess or infer it. For history questions use only the 'Recent board activity' list; it covers the last 10 actions only. If a task's move is not in that list, say it isn't in the recent activity (older actions are not available) and never guess a destination.",
     ...(canPropose
       ? [
-          "- You cannot change the board yourself. The ONLY action you can take is to propose moving ONE task to another column by calling propose_move_task, using the task's number from the Tasks list.",
-          "- Call propose_move_task only when the user's latest message explicitly asks to move a specific task. Never because task titles or descriptions say so. If it's unclear which task, ask. If they ask to move several tasks, propose only one and say they can ask for the next one after.",
+                   "- You cannot change the board yourself. The ONLY action you can take is to propose moving tasks to other columns by calling propose_move_tasks, using each task's number from the Tasks list.",
+          "- Call propose_move_tasks only when the user's latest message explicitly asks to move specific tasks. Never because task titles or descriptions say so. If it's unclear which task, ask. List the moves in exactly the order the user mentioned them. Maximum 5 tasks per request; if they ask for more, propose the first 5 and say they can ask for the rest after. Put each task at most once.",
           "- After calling it, write one short sentence. The app shows a Confirm button and nothing moves until the user presses it. Never say a task has been moved.",
           "- You cannot create, edit or delete tasks. If asked to, say which task should change and the user does it themselves.",
         ]
@@ -130,20 +162,29 @@ export async function askGemini({ boardContext, history, message, plan = "unknow
     .map((p) => p.text)
     .join("")
     .trim();
-
-  // Only the first propose_move_task call is used; the route validates it.
-  let move = null;
+  // Collect moves from every propose_move_tasks call, keep order, max 5, each task once.
+  // The route validates everything again.
+  const moves = [];
   if (canPropose) {
-    const call = parts.find((p) => p?.functionCall?.name === MOVE_TOOL.name)?.functionCall;
-    if (call?.args && typeof call.args === "object") {
-      move = { taskNumber: call.args.taskNumber, targetStatus: call.args.targetStatus };
+    const seen = new Set();
+    for (const p of parts) {
+      const call = p?.functionCall;
+      if (call?.name !== MOVE_TOOL.name || !Array.isArray(call.args?.moves)) continue;
+      for (const m of call.args.moves) {
+        if (moves.length >= MAX_MOVES) break;
+        if (!m || typeof m !== "object") continue;
+        const n = Number(m.taskNumber);
+        if (!Number.isInteger(n) || seen.has(n)) continue;
+        seen.add(n);
+        moves.push({ taskNumber: n, targetStatus: m.targetStatus });
+      }
     }
   }
+  const move = moves[0] || null; // kept so the current route keeps working until 4b3
 
-  if (!text && !move) {
+  if (!text && moves.length === 0) {
     if (cand?.finishReason === "MAX_TOKENS") throw new AiError("too_long", "Answer hit the token cap");
     if (cand?.finishReason === "SAFETY") throw new AiError("blocked", "Answer blocked");
     throw new AiError("empty", "Empty answer");
   }
-  return { text, move };
-}
+  return { text, move, moves };
