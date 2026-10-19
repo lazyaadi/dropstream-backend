@@ -101,7 +101,7 @@ function buildTeamLines(team) {
   ];
 }
 
-export function buildBoardContext(ws, todayISO, { isPro = false, team = null, planUnknown = false, tz = "UTC" } = {}) {
+export function buildBoardContextWithRefs(ws, todayISO, { isPro = false, team = null, planUnknown = false, tz = "UTC" } = {}) {
   const today = dateOnly(todayISO) || new Date().toISOString().slice(0, 10);
   const zone = safeTimeZone(tz);
   const rawTasks = Array.isArray(ws?.tasks) ? ws.tasks : [];
@@ -115,6 +115,7 @@ export function buildBoardContext(ws, todayISO, { isPro = false, team = null, pl
       const isDone = status === "done";
       const daysLeft = dueDate ? dayDiff(dueDate, today) : null;
       return {
+        id: typeof t.id === "string" ? t.id : "",
         title: clean(t.title, 100) || "(untitled)",
         description: clean(t.description, 300),
         status,
@@ -152,6 +153,7 @@ export function buildBoardContext(ws, todayISO, { isPro = false, team = null, pl
       (PRIORITY_RANK[a.priority] ?? 3) - (PRIORITY_RANK[b.priority] ?? 3)
   );
 
+
   const newest = tasks.reduce((best, t) => (t.createdMs > (best?.createdMs || 0) ? t : best), null);
 
    const activity = isPro ? buildActivityLines(ws?.history, zone) : [];
@@ -180,14 +182,21 @@ export function buildBoardContext(ws, todayISO, { isPro = false, team = null, pl
   ].join("\n");
 
   let listed = 0;
+  const refs = []; // refs[n-1] = real task id of the task shown as number n
   for (const t of tasks) {
     if (listed >= MAX_TASKS_LISTED) break;
     const line = "\n" + formatTask(t, listed + 1);
     if (out.length + line.length > MAX_CONTEXT_CHARS) break;
     out += line;
+    refs.push(t.id || null);
     listed++;
   }
   if (tasks.length === 0) out += "\n(no tasks)";
   else if (listed < tasks.length) out += `\n(${tasks.length - listed} more tasks not shown; counts above include all tasks.)`;
-  return out;
+  return { text: out, refs };
+}
+
+// Old signature kept so the existing /api/ai/chat route keeps working.
+export function buildBoardContext(ws, todayISO, opts) {
+  return buildBoardContextWithRefs(ws, todayISO, opts).text;
 }

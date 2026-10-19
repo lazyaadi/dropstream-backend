@@ -20,7 +20,7 @@ import {
   signToken,
   verifyToken,
 } from "./security.mjs";
-import { buildBoardContext } from "./boardContext.mjs";
+import { buildBoardContextWithRefs } from "./boardContext.mjs";
 import { askGemini } from "./gemini.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
@@ -2287,6 +2287,36 @@ async function countWindowedAction(scope, windowMs, max) {
   return { allowed: count <= max, retryAfterMs };
 }
 
+const AI_MOVE_STATUSES = ["todo", "in-progress", "done"];
+const AI_STATUS_LABELS = { todo: "To Do", "in-progress": "In Progress", done: "Done" };
+
+// Turns the model's raw call into a card built ONLY from server data. Returns:
+// { proposal } | { already: {title, toLabel} } | null (invalid, dropped)
+function buildMoveProposal(ws, refs, move) {
+  const n = Number(move?.taskNumber);
+  const target = move?.targetStatus;
+  if (!Number.isInteger(n) || n < 1 || n > refs.length) return null;
+  if (typeof target !== "string" || !AI_MOVE_STATUSES.includes(target)) return null;
+  const id = refs[n - 1];
+  if (!id) return null;
+  const task = (Array.isArray(ws?.tasks) ? ws.tasks : []).find((t) => t && t.id === id);
+  if (!task || !AI_MOVE_STATUSES.includes(task.status)) return null;
+  const title = String(task.title || "").replace(/[\u0000-\u001F\u007F]+/g, " ").trim().slice(0, 100) || "(untitled)";
+  if (task.status === target) return { already: { title, toLabel: AI_STATUS_LABELS[target] } };
+  return {
+    proposal: {
+      type: "move_task",
+      taskId: id,
+      title,
+      from: task.status,
+      to: target,
+      fromLabel: AI_STATUS_LABELS[task.status],
+      toLabel: AI_STATUS_LABELS[target],
+    },
+  };
+}
+
+
 app.post("/api/ai/chat", async (req, res) => {
   try {
     // 1) Auth
@@ -2368,7 +2398,7 @@ app.post("/api/ai/chat", async (req, res) => {
           online: getValidOnlineMembers(ws).map((u) => ({ name: u.name, role: u.role })),
         }
       : null;
-    const boardContext = buildBoardContext(ws, today, {
+    const { text: boardContext, refs } = buildBoardContextWithRefs(ws, today, {
       isPro,
       team,
       planUnknown,
@@ -2378,8 +2408,22 @@ app.post("/api/ai/chat", async (req, res) => {
     // 6) Ask Gemini
     try {
       const plan = planUnknown ? "unknown" : isPro ? "Pro" : "Free";
-      const reply = await askGemini({ boardContext, history, message, plan });
-      return res.json({ ok: true, reply });
+      const result = await askGemini({ boardContext, history, message, plan, canPropose: isPro });
+      let reply = result.text;
+      let proposal = null;
+      if (isPro && result.move) {
+        const built = buildMoveProposal(ws, refs, result.move);
+        if (built?.proposal) {
+          proposal = built.proposal;
+          // Card text comes from server data, never from the model's words.
+          reply = `Ready to move "${proposal.title}" to ${proposal.toLabel}. Confirm below.`;
+        } else if (built?.already) {
+          reply = `"${built.already.title}" is already in ${built.already.toLabel}.`;
+        } else if (!reply) {
+          reply = "I couldn't tell which task you mean. Can you give me its name?";
+        }
+      }
+      return res.json({ ok: true, reply, ...(proposal ? { proposal } : {}) });
     } catch (err) {
       console.error("[ai/chat] AI error:", err?.code || err?.message);
       switch (err?.code) {
