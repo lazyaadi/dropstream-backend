@@ -2251,6 +2251,7 @@ const AI_GLOBAL_PER_DAY = Number(process.env.AI_GLOBAL_PER_DAY) || 400; // prote
 const AI_MAX_MESSAGE_CHARS = 1000;
 const AI_MAX_HISTORY = 10;
 const AI_MAX_HISTORY_CHARS = 2000;
+const AI_ACT_PER_MIN = Math.max(1, parseInt(process.env.AI_ACT_PER_MIN || "10", 10) || 10);
 const aiWindowMemory = new Map(); // fallback only, used when Mongo is unavailable
 
 // Fixed-window counter in the rate_limits collection (atomic upsert, TTL-cleaned).
@@ -2442,6 +2443,114 @@ app.post("/api/ai/chat", async (req, res) => {
     }
   } catch (err) {
     console.error("[ai/chat] Unexpected error:", err?.message);
+    return res.status(500).json({ error: "Something went wrong." });
+  }
+});
+
+// Runs a move the user CONFIRMED in the chat. Same rules as the socket move,
+// but changes only the one task found by id. Never trusts model or client text.
+app.post("/api/ai/action", async (req, res) => {
+  try {
+    // 1) Auth
+    const email = getVerifiedSessionEmail(req.headers.cookie || "");
+    if (!email) return res.status(401).json({ error: "Not authenticated." });
+
+    // 2) Validation (whitelists only)
+    const body = req.body && typeof req.body === "object" ? req.body : {};
+    const workspaceName = typeof body.workspaceName === "string" ? normalizeText(body.workspaceName) : "";
+    const taskId = typeof body.taskId === "string" ? body.taskId.trim() : "";
+    if (!workspaceName || workspaceName.length > 100) return res.status(400).json({ error: "Invalid workspace." });
+    if (body.action !== "move_task") return res.status(400).json({ error: "Unsupported action." });
+    if (!taskId || taskId.length > 100) return res.status(400).json({ error: "Invalid task." });
+    if (!AI_MOVE_STATUSES.includes(body.targetStatus) || !AI_MOVE_STATUSES.includes(body.expectedFrom)) {
+      return res.status(400).json({ error: "Invalid column." });
+    }
+    const targetStatus = body.targetStatus;
+    const expectedFrom = body.expectedFrom;
+
+    // 3) Membership + role (derived on the server, never from the client)
+    let ws = workspaces[workspaceName];
+    if (!ws) {
+      const loaded = await loadRoomFromDB(workspaceName);
+      if (loaded) {
+        workspaces[workspaceName] = loaded;
+        ws = loaded;
+      }
+    }
+    if (!ws) return res.status(403).json({ error: "You are not a member of this workspace." });
+    const creatorEmail = normalizeEmail(ws.creatorEmail);
+    const member = Array.isArray(ws.members) ? ws.members.find((m) => normalizeEmail(m?.email) === email) : null;
+    const isCreator = !!creatorEmail && creatorEmail === email;
+    if (!isCreator && !member) return res.status(403).json({ error: "You are not a member of this workspace." });
+    const role = isCreator ? "admin" : member?.role;
+    if (role !== "admin" && role !== "member") {
+      return res.status(403).json({ error: "Your role can't change tasks." });
+    }
+    const actorName = normalizeText(member?.displayName || member?.name || "") || "A teammate";
+
+    // 4) Rate limit (own bucket; no Gemini cost)
+    const lim = await countWindowedAction(`ai_act:${email}`, 60 * 1000, AI_ACT_PER_MIN);
+    if (!lim.allowed) {
+      res.set("Retry-After", String(Math.ceil(lim.retryAfterMs / 1000)));
+      return res.status(429).json({ error: "Too many actions. Wait a moment and try again." });
+    }
+
+    // 5) Pro re-check at execution time (expiry included). If we can't verify, we don't move anything.
+    let profile = null;
+    try {
+      profile = await getHydratedUserProfile(email);
+    } catch {
+      profile = null;
+    }
+    if (!profile) return res.status(503).json({ error: "Can't verify your plan right now. Try again in a moment." });
+    if (profile.isPro !== true) return res.status(403).json({ error: "Moving tasks with the AI is a Pro feature." });
+
+    // 6) From here to the push there is NO await, so a concurrent update can't be overwritten.
+    const tasks = Array.isArray(ws.tasks) ? ws.tasks : [];
+    const current = tasks.find((t) => t && t.id === taskId);
+    if (!current) return res.status(404).json({ error: "That task no longer exists." });
+    if (current.status === targetStatus) {
+      return res.status(409).json({ code: "already", error: `Already in ${AI_STATUS_LABELS[targetStatus]}.` });
+    }
+    if (current.status !== expectedFrom) {
+      return res.status(409).json({ code: "stale", error: "This task changed since the proposal. Ask again." });
+    }
+
+    const nowISO = new Date().toISOString();
+    const isDone = targetStatus === "done";
+    ws.tasks = tasks.map((t) =>
+      t && t.id === taskId
+        ? {
+            ...t,
+            status: targetStatus,
+            log: `Moved by ${actorName}`,
+            completedAt: isDone ? nowISO : null,
+            completedBy: isDone ? actorName : null,
+          }
+        : t
+    );
+    if (!Array.isArray(ws.history)) ws.history = [];
+    pushHistory(ws, {
+      action: "move_task",
+      taskTitle: current.title || null,
+      targetStatus: AI_STATUS_LABELS[targetStatus],
+      userName: actorName,
+      userRole: role,
+      timestamp: nowISO,
+    });
+
+    await saveRoomToDB(workspaceName);
+
+    io.to(workspaceName).emit("receive_update", { tasks: ws.tasks, history: ws.history });
+    io.to(workspaceName).emit("history_update", ws.history);
+
+    return res.json({
+      ok: true,
+      task: { id: taskId, title: String(current.title || ""), status: targetStatus },
+      toLabel: AI_STATUS_LABELS[targetStatus],
+    });
+  } catch (err) {
+    console.error("[ai/action] Unexpected error:", err?.message);
     return res.status(500).json({ error: "Something went wrong." });
   }
 });
