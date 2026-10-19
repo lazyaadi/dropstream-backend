@@ -2290,6 +2290,7 @@ async function countWindowedAction(scope, windowMs, max) {
 
 const AI_MOVE_STATUSES = ["todo", "in-progress", "done"];
 const AI_STATUS_LABELS = { todo: "To Do", "in-progress": "In Progress", done: "Done" };
+const AI_MAX_MOVES = 5; // keep equal to MAX_MOVES in gemini.mjs
 
 // Turns the model's raw call into a card built ONLY from server data. Returns:
 // { proposal } | { already: {title, toLabel} } | null (invalid, dropped)
@@ -2410,21 +2411,38 @@ app.post("/api/ai/chat", async (req, res) => {
     try {
       const plan = planUnknown ? "unknown" : isPro ? "Pro" : "Free";
       const result = await askGemini({ boardContext, history, message, plan, canPropose: isPro });
-      let reply = result.text;
-      let proposal = null;
-      if (isPro && result.move) {
-        const built = buildMoveProposal(ws, refs, result.move);
-        if (built?.proposal) {
-          proposal = built.proposal;
-          // Card text comes from server data, never from the model's words.
-          reply = `Ready to move "${proposal.title}" to ${proposal.toLabel}. Confirm below.`;
-        } else if (built?.already) {
-          reply = `"${built.already.title}" is already in ${built.already.toLabel}.`;
+         let reply = result.text;
+      const proposals = [];
+      const already = [];
+      if (isPro && Array.isArray(result.moves) && result.moves.length) {
+        const usedIds = new Set();
+        for (const mv of result.moves.slice(0, AI_MAX_MOVES)) {
+          const built = buildMoveProposal(ws, refs, mv);
+          if (built?.proposal) {
+            if (usedIds.has(built.proposal.taskId)) continue; // each task once
+            usedIds.add(built.proposal.taskId);
+            proposals.push(built.proposal);
+          } else if (built?.already) {
+            already.push(built.already);
+          }
+        }
+        // Card text comes from server data, never from the model's words.
+        if (proposals.length === 1) {
+          reply = `Ready to move "${proposals[0].title}" to ${proposals[0].toLabel}. Confirm below.`;
+        } else if (proposals.length > 1) {
+          reply = `Ready to move ${proposals.length} tasks, in this order. Confirm below.`;
+        } else if (already.length === 1) {
+          reply = `"${already[0].title}" is already in ${already[0].toLabel}.`;
+        } else if (already.length > 1) {
+          reply = "Those tasks are already in the columns you asked for.";
         } else if (!reply) {
-          reply = "I couldn't tell which task you mean. Can you give me its name?";
+          reply = "I couldn't tell which tasks you mean. Can you give me their names?";
+        }
+        if (proposals.length && already.length) {
+          reply += ` ${already.length} already in place, skipped.`;
         }
       }
-      return res.json({ ok: true, reply, ...(proposal ? { proposal } : {}) });
+      return res.json({ ok: true, reply, ...(proposals.length ? { proposals } : {}) });
     } catch (err) {
       console.error("[ai/chat] AI error:", err?.code || err?.message);
       switch (err?.code) {

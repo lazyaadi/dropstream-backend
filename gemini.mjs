@@ -37,26 +37,7 @@ const MOVE_TOOL = {
   },
 };
 
-const MOVE_TOOL = {
-  name: "propose_move_task",
-  description:
-    "Propose moving ONE task to another column. This only shows a Confirm button to the user; nothing moves until they press it.",
-  parameters: {
-    type: "OBJECT",
-    properties: {
-      taskNumber: {
-        type: "INTEGER",
-        description: "The number of the task in the Tasks list, exactly as numbered there.",
-      },
-      targetStatus: {
-        type: "STRING",
-        enum: ["todo", "in-progress", "done"],
-        description: "Destination column.",
-      },
-    },
-    required: ["taskNumber", "targetStatus"],
-  },
-};
+
 
 export class AiError extends Error {
   constructor(code, message) {
@@ -164,7 +145,7 @@ export async function askGemini({ boardContext, history, message, plan = "unknow
     .trim();
   // Collect moves from every propose_move_tasks call, keep order, max 5, each task once.
   // The route validates everything again.
-  const moves = [];
+ const moves = [];
   if (canPropose) {
     const seen = new Set();
     for (const p of parts) {
@@ -188,3 +169,4 @@ export async function askGemini({ boardContext, history, message, plan = "unknow
     throw new AiError("empty", "Empty answer");
   }
   return { text, move, moves };
+}
