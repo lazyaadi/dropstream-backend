@@ -1681,17 +1681,22 @@ io.on("connection", (socket) => {
     });
   });
 
-  socket.on("deactivate_pro", async ({ email } = {}) => {
-    const key = normalizeEmail(email);
+  socket.on("deactivate_pro", async () => {
+    // Identity comes ONLY from the signed session cookie. Anything the client sends is ignored.
+    const key = getVerifiedSessionEmail(socket.handshake?.headers?.cookie || "");
     if (!key) {
-      return socket.emit("pro_deactivate_error", "Valid email is required.");
+      return socket.emit("session_expired", { reason: "no_session" });
     }
-    const userRec = await ensureUserLoaded(email);
+    const throttle = await allowSensitiveAttempt(scopeForEmail("deactivate_pro", key));
+    if (!throttle.allowed) {
+      return socket.emit("pro_deactivate_error", "Too many attempts. Please wait a few minutes and try again.");
+    }
+    const userRec = await ensureUserLoaded(key);
     if (!userRec) {
       return socket.emit("pro_deactivate_error", "Account not found. Sign in first.");
     }
     try {
-      await deactivateUserPro(email);
+      await deactivateUserPro(key);
       socket.emit("pro_deactivated");
     } catch (err) {
       socket.emit("pro_deactivate_error", "Failed to deactivate Pro.");
