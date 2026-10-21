@@ -60,6 +60,7 @@ function dayDiff(a, b) {
 function formatTask(t, n) {
   const parts = [`${n}. [${STATUS_LABELS[t.status] || "Unknown"}] [${PRIORITY_LABELS[t.priority] || "Unknown"}] "${t.title}"`];
   if (t.dueDate) parts.push(t.overdue ? `due ${t.dueDate} (OVERDUE by ${-t.daysLeft}d)` : `due ${t.dueDate}`);
+parts.push(`column position ${t.colPos}`);
   if (t.createdBy) parts.push(`created by ${t.createdBy}`);
   if (t.createdAt) parts.push(`created ${t.createdAt}`);
   if (t.isDone && (t.completedAt || t.completedBy)) {
@@ -108,7 +109,7 @@ export function buildBoardContextWithRefs(ws, todayISO, { isPro = false, team = 
 
   const tasks = rawTasks
     .filter((t) => t && typeof t === "object" && !Array.isArray(t))
-    .map((t) => {
+    .map((t, boardIdx) => {
       const status = STATUS_LABELS[t.status] ? t.status : "unknown";
       const priority = PRIORITY_LABELS[t.priority] ? t.priority : "unknown";
       const dueDate = dateOnly(t.dueDate);
@@ -126,7 +127,8 @@ export function buildBoardContextWithRefs(ws, todayISO, { isPro = false, team = 
         overdue: !isDone && daysLeft !== null && daysLeft < 0,
         createdBy: isPro ? clean(t.creatorName || t.addedBy, 40) : "",
         createdAt: dateTime(t.createdAt, zone),
-        createdMs: Number.isNaN(Date.parse(t.createdAt)) ? 0 : Date.parse(t.createdAt),
+                createdMs: Number.isNaN(Date.parse(t.createdAt)) ? 0 : Date.parse(t.createdAt),
+        boardIdx,
         completedBy: isPro ? clean(t.completedBy, 40) : "",        
         completedAt: dateOnly(t.completedAt),
 
@@ -144,14 +146,14 @@ export function buildBoardContextWithRefs(ws, todayISO, { isPro = false, team = 
     if (!t.isDone && t.priority === "high") highOpen++;
   }
 
-  // Open tasks first, overdue on top, then by due date, then priority.
-  tasks.sort(
-    (a, b) =>
-      Number(a.isDone) - Number(b.isDone) ||
-      Number(b.overdue) - Number(a.overdue) ||
-      (a.dueDate || "9999").localeCompare(b.dueDate || "9999") ||
-      (PRIORITY_RANK[a.priority] ?? 3) - (PRIORITY_RANK[b.priority] ?? 3)
-  );
+   // Board order: To Do, In Progress, Done. Inside each column keep the on-screen order (position 1 = top card).
+  const COL_RANK = { todo: 0, "in-progress": 1, done: 2 };
+  tasks.sort((a, b) => (COL_RANK[a.status] ?? 3) - (COL_RANK[b.status] ?? 3) || a.boardIdx - b.boardIdx);
+  const posCount = {};
+  for (const t of tasks) {
+    posCount[t.status] = (posCount[t.status] || 0) + 1;
+    t.colPos = posCount[t.status];
+  }
 
 
   const newest = tasks.reduce((best, t) => (t.createdMs > (best?.createdMs || 0) ? t : best), null);
@@ -178,7 +180,7 @@ export function buildBoardContextWithRefs(ws, todayISO, { isPro = false, team = 
             ? `Plan could not be verified right now (temporary problem), so Pro-only data (who created or moved tasks, history, team, online) is withheld. If the user asks for it, say you can't check their plan right now and to try again in a moment. Do not say it is Pro-only.`
             : `Restricted (Pro only, not available on the Free plan): who created, moved or completed tasks, task history/last actions, and online/team members.`,
         ]),
-    `Tasks (listed by urgency, NOT by creation time: not-done first, overdue on top, then done):`,
+    `Tasks (listed in board order: To Do, then In Progress, then Done. "column position 1" is the TOP card of that column. This is NOT creation order):`,
   ].join("\n");
 
   let listed = 0;
