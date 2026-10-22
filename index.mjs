@@ -22,6 +22,7 @@ import {
 } from "./security.mjs";
 import { buildBoardContextWithRefs } from "./boardContext.mjs";
 import { askGemini } from "./gemini.mjs";
+import { transcribeAudio, normalizeAudioMime } from "./gemini.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -2444,6 +2445,124 @@ app.post("/api/ai/chat", async (req, res) => {
   }
 });
 
+
+// ---------- AI voice: speech -> text (Pro only) ----------
+// Audio is never stored or logged. The route returns plain text only; it never touches
+// the board. The text still goes through /api/ai/chat + the Confirm card like typing.
+const aiVoiceEnvInt = (name, def) => {
+  const n = parseInt(process.env[name] || "", 10);
+  return Number.isFinite(n) && n > 0 ? n : def;
+};
+const AI_VOICE_PER_MIN = aiVoiceEnvInt("AI_VOICE_PER_MIN", 6);
+const AI_VOICE_PER_DAY = aiVoiceEnvInt("AI_VOICE_PER_DAY", 20);
+const AI_VOICE_GLOBAL_PER_DAY = aiVoiceEnvInt("AI_VOICE_GLOBAL_PER_DAY", 100);
+const AI_VOICE_MAX_BYTES = 1.5 * 1024 * 1024;
+const AI_VOICE_MIN_BYTES = 1000;
+
+// The real file type from its first bytes. The Content-Type header alone is not trusted.
+function sniffAudioMime(buf) {
+  if (!Buffer.isBuffer(buf) || buf.length < 12) return null;
+  if (buf[0] === 0x1a && buf[1] === 0x45 && buf[2] === 0xdf && buf[3] === 0xa3) return "audio/webm";
+  if (buf.toString("latin1", 4, 8) === "ftyp") return "audio/mp4";
+  if (buf.toString("latin1", 0, 4) === "OggS") return "audio/ogg";
+  if (buf.toString("latin1", 0, 4) === "RIFF" && buf.toString("latin1", 8, 12) === "WAVE") return "audio/wav";
+  return null;
+}
+
+// Cheap checks BEFORE the body is read, so a Free account or an attacker can't make us receive 1.5 MB.
+async function aiVoiceGate(req, res, next) {
+  try {
+    const email = getVerifiedSessionEmail(req.headers.cookie || "");
+    if (!email) return res.status(401).json({ error: "Not authenticated." });
+
+    const mime = normalizeAudioMime(req.headers["content-type"]);
+    if (!mime) return res.status(400).json({ code: "bad_audio", error: "Unsupported audio type." });
+
+    const len = Number(req.headers["content-length"]);
+    if (!Number.isFinite(len) || len <= 0) return res.status(400).json({ code: "bad_audio", error: "Missing audio." });
+    if (len > AI_VOICE_MAX_BYTES) return res.status(413).json({ code: "too_big", error: "Recording is too long." });
+
+    const lim = await countWindowedAction(`ai_voice_min:${email}`, 60 * 1000, AI_VOICE_PER_MIN);
+    if (!lim.allowed) {
+      const retryAfterSec = Math.ceil(lim.retryAfterMs / 1000);
+      res.set("Retry-After", String(retryAfterSec));
+      return res.status(429).json({ code: "rate_minute", error: "Too many recordings. Wait a moment and try again.", retryAfterSec });
+    }
+
+    let profile = null;
+    try {
+      profile = await getHydratedUserProfile(email);
+    } catch {
+      profile = null;
+    }
+    if (!profile) return res.status(503).json({ error: "Can't verify your plan right now. Try again in a moment." });
+    if (profile.isPro !== true) return res.status(403).json({ error: "Voice input is a Pro feature." });
+
+    req.voiceEmail = email;
+    req.voiceMime = mime;
+    return next();
+  } catch (err) {
+    console.error("[ai/transcribe] gate error:", err?.message);
+    return res.status(500).json({ error: "Something went wrong." });
+  }
+}
+
+app.post(
+  "/api/ai/transcribe",
+  aiVoiceGate,
+  express.raw({ type: () => true, limit: AI_VOICE_MAX_BYTES }),
+  async (req, res) => {
+    try {
+      const email = req.voiceEmail;
+      const audio = req.body;
+      if (!Buffer.isBuffer(audio) || audio.length < AI_VOICE_MIN_BYTES) {
+        return res.status(400).json({ code: "bad_audio", error: "That recording was too short or empty." });
+      }
+      if (sniffAudioMime(audio) !== req.voiceMime) {
+        return res.status(400).json({ code: "bad_audio", error: "Couldn't read that recording." });
+      }
+
+      // Daily caps count only recordings that passed validation.
+      const day = await countWindowedAction(`ai_voice_day:${email}`, 24 * 60 * 60 * 1000, AI_VOICE_PER_DAY);
+      if (!day.allowed) {
+        return res.status(429).json({ code: "rate_daily", error: "You've reached today's voice limit. You can still type." });
+      }
+      const global = await countWindowedAction("ai_voice_global", 24 * 60 * 60 * 1000, AI_VOICE_GLOBAL_PER_DAY);
+      if (!global.allowed) {
+        return res.status(429).json({ code: "rate_global", error: "Voice is busy right now. Please type instead." });
+      }
+
+      try {
+        const text = await transcribeAudio({ audio, mime: req.voiceMime });
+        res.set("Cache-Control", "no-store");
+        return res.json({ ok: true, text });
+      } catch (err) {
+        console.error("[ai/transcribe] AI error:", err?.code || err?.message);
+        switch (err?.code) {
+          case "no_speech":
+            return res.status(422).json({ code: "no_speech", error: "Didn't catch that. Try again." });
+          case "bad_audio":
+            return res.status(400).json({ code: "bad_audio", error: "Couldn't read that recording." });
+          case "quota":
+            return res.status(429).json({ code: "provider_quota", error: "Voice is busy right now. Try again in a minute or type instead." });
+          case "timeout":
+            return res.status(504).json({ error: "Transcribing took too long. Try again." });
+          case "blocked":
+          case "too_long":
+            return res.status(422).json({ error: "Couldn't transcribe that. Try again." });
+          case "not_configured":
+            return res.status(503).json({ error: "The AI assistant isn't set up on the server yet." });
+          default:
+            return res.status(502).json({ error: "The voice service had a problem. Try again shortly." });
+        }
+      }
+    } catch (err) {
+      console.error("[ai/transcribe] Unexpected error:", err?.message);
+      return res.status(500).json({ error: "Something went wrong." });
+    }
+  }
+);
+const PORT = process.env.PORT || 3001;
 // Runs a move the user CONFIRMED in the chat. Same rules as the socket move,
 // but changes only the one task found by id. Never trusts model or client text.
 app.post("/api/ai/action", async (req, res) => {
@@ -2552,7 +2671,7 @@ app.post("/api/ai/action", async (req, res) => {
   }
 });
 
-const PORT = process.env.PORT || 3001;
+
 
 async function startServer() {   
   await connectDB();
