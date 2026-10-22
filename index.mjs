@@ -1575,14 +1575,7 @@ io.on("connection", (socket) => {
     finalizeGoogleAuth(socket, verified, "redirect");
   });
 
-  socket.on("check_pro_status", ({ email } = {}) => {
-    const key = normalizeEmail(email);
-    getHydratedUserProfile(key).then((profile) => {
-      socket.emit("pro_status", { isPro: !!profile?.isPro, proExpiresAt: profile?.proExpiresAt || null });
-    }).catch(() => {
-      socket.emit("pro_status", { isPro: false });
-    });
-  });
+;
 
   socket.on("set_user_pro", async ({ email, proPin } = {}) => {
     const key = normalizeEmail(email);
