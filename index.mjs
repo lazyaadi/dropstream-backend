@@ -2349,11 +2349,25 @@ app.post("/api/ai/chat", async (req, res) => {
       res.set("Retry-After", String(retryAfterSec));
       return res.status(429).json({ code: "rate_minute", error: "You're sending messages too fast. Wait a moment and try again.", retryAfterSec });
     }
-    const day = await countWindowedAction(`ai_day:${email}`, 24 * 60 * 60 * 1000, AI_PER_DAY);
+    // Plan first (Free and Pro have separate daily budgets, so Free can't use up Pro's).
+    let isPro = false;
+    let planUnknown = false;
+    try {
+      const profile = await getHydratedUserProfile(email);
+      if (!profile) planUnknown = true; // user record not found / DB problem
+      isPro = profile?.isPro === true;
+    } catch {
+      planUnknown = true; // treated as Free, and the AI is told the plan is unverified
+    }
+    const day = await countWindowedAction(`ai_day:${email}`, 24 * 60 * 60 * 1000, isPro ? AI_PER_DAY : AI_FREE_PER_DAY);
     if (!day.allowed) {
       return res.status(429).json({ code: "rate_daily", error: "You've reached today's AI limit. Try again tomorrow." });
     }
-    const global = await countWindowedAction("ai_day_global", 24 * 60 * 60 * 1000, AI_GLOBAL_PER_DAY);
+    const global = await countWindowedAction(
+      isPro ? "ai_day_global" : "ai_free_global",
+      24 * 60 * 60 * 1000,
+      isPro ? AI_GLOBAL_PER_DAY : AI_FREE_GLOBAL_PER_DAY
+    );
     if (!global.allowed) {
       return res.status(429).json({ code: "rate_global", error: "The AI assistant has reached its daily capacity. Try again tomorrow." });
     }
@@ -2364,15 +2378,6 @@ app.post("/api/ai/chat", async (req, res) => {
     if (typeof body.today === "string" && /^\d{4}-\d{2}-\d{2}$/.test(body.today)) {
       const diffDays = Math.abs(Date.parse(body.today + "T00:00:00Z") - Date.parse(serverToday + "T00:00:00Z")) / 86400000;
       if (diffDays <= 1) today = body.today;
-    }
-        let isPro = false;
-    let planUnknown = false;
-    try {
-      const profile = await getHydratedUserProfile(email);
-      if (!profile) planUnknown = true; // user record not found / DB problem
-      isPro = profile?.isPro === true;
-    } catch {
-      planUnknown = true; // treat as Free, but tell the AI the plan is unverified
     }
     const team = isPro
       ? {
@@ -2453,6 +2458,9 @@ const aiVoiceEnvInt = (name, def) => {
   const n = parseInt(process.env[name] || "", 10);
   return Number.isFinite(n) && n > 0 ? n : def;
 };
+
+const AI_FREE_PER_DAY = aiVoiceEnvInt("AI_FREE_PER_DAY", 10);
+const AI_FREE_GLOBAL_PER_DAY = aiVoiceEnvInt("AI_FREE_GLOBAL_PER_DAY", 100);
 const AI_VOICE_PER_MIN = aiVoiceEnvInt("AI_VOICE_PER_MIN", 6);
 const AI_VOICE_PER_DAY = aiVoiceEnvInt("AI_VOICE_PER_DAY", 20);
 const AI_VOICE_GLOBAL_PER_DAY = aiVoiceEnvInt("AI_VOICE_GLOBAL_PER_DAY", 100);
