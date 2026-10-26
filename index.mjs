@@ -1077,6 +1077,7 @@ function finalizeGoogleAuth(socket, payload, source = "google") {
   }
 
   const key = email;
+  socket.data.verifiedEmail = key;
 
   const finalizeExisting = (userRecord) => {
     userRecord.authProvider = "google";
@@ -1514,6 +1515,7 @@ io.on("connection", (socket) => {
       }
       const profile = await getHydratedUserProfile(email);
       const { count, resetAt } = getUserTaskData(email);
+      socket.data.verifiedEmail = key;
       return socket.emit("auth_success", {
         email: key,
         name: profile?.name || existing.name,
@@ -1528,6 +1530,7 @@ io.on("connection", (socket) => {
         return socket.emit("auth_error", "Name is required for new accounts.");
       }
       const { user } = await registerUser(email, name.trim(), password);
+      socket.data.verifiedEmail = key;
       return socket.emit("auth_success", {
         email: key,
         name: user.name,
@@ -1658,7 +1661,7 @@ io.on("connection", (socket) => {
 
   socket.on("deactivate_pro", async () => {
     // Identity comes ONLY from the signed session cookie. Anything the client sends is ignored.
-    const key = getVerifiedSessionEmail(socket.handshake?.headers?.cookie || "");
+    const key = getVerifiedSessionEmail(socket.handshake?.headers?.cookie || "") || normalizeEmail(socket.data?.verifiedEmail || "");
     if (!key) {
       return socket.emit("session_expired", { reason: "no_session" });
     }
@@ -2665,8 +2668,14 @@ app.post("/api/ai/action", async (req, res) => {
 
     await saveRoomToDB(workspaceName);
 
-    io.to(workspaceName).emit("receive_update", { tasks: ws.tasks, history: ws.history });
-    io.to(workspaceName).emit("history_update", ws.history);
+for (const [sid, u] of ws.sockets) {
+  if (normalizeEmail(u?.email) === email) {
+    io.to(sid).emit("receive_update", { tasks: ws.tasks, history: ws.history, silent: true });
+  } else {
+    io.to(sid).emit("receive_update", { tasks: ws.tasks, history: ws.history });
+    io.to(sid).emit("history_update", ws.history);
+  }
+}
 
     return res.json({
       ok: true,
