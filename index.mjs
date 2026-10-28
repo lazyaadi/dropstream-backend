@@ -2231,6 +2231,7 @@ if (!isCreating) {
 const AI_PER_MIN = Number(process.env.AI_PER_MIN) || 6;
 const AI_PER_DAY = Number(process.env.AI_PER_DAY) || 40;
 const AI_GLOBAL_PER_DAY = Number(process.env.AI_GLOBAL_PER_DAY) || 400; // protects the shared free-tier key
+const AI_GLOBAL_PER_MIN = Number(process.env.AI_GLOBAL_PER_MIN) || 12; // shared by chat + voice, stays under Gemini's ~15 RPM
 const AI_MAX_MESSAGE_CHARS = 1000;
 const AI_MAX_HISTORY = 10;
 const AI_MAX_HISTORY_CHARS = 2000;
@@ -2374,7 +2375,12 @@ app.post("/api/ai/chat", async (req, res) => {
     if (!global.allowed) {
       return res.status(429).json({ code: "rate_global", error: "The AI assistant has reached its daily capacity. Try again tomorrow." });
     }
-
+    const busy = await countWindowedAction("ai_global_min", 60 * 1000, AI_GLOBAL_PER_MIN);
+    if (!busy.allowed) {
+      const retryAfterSec = Math.ceil(busy.retryAfterMs / 1000);
+      res.set("Retry-After", String(retryAfterSec));
+      return res.status(429).json({ code: "rate_busy", error: "The AI is busy right now. Try again in a few seconds.", retryAfterSec });
+    }
     // 5) Build context (client may send its local date; accepted only if within 1 day of server date)
     const serverToday = new Date().toISOString().slice(0, 10);
     let today = serverToday;
@@ -2543,6 +2549,13 @@ app.post(
         return res.status(429).json({ code: "rate_global", error: "Voice is busy right now. Please type instead." });
       }
 
+            const busy = await countWindowedAction("ai_global_min", 60 * 1000, AI_GLOBAL_PER_MIN);
+      if (!busy.allowed) {
+        const retryAfterSec = Math.ceil(busy.retryAfterMs / 1000);
+        res.set("Retry-After", String(retryAfterSec));
+        return res.status(429).json({ code: "rate_busy", error: "Voice is busy right now. Try again in a few seconds.", retryAfterSec });
+      }
+      
       try {
         const text = await transcribeAudio({ audio, mime: req.voiceMime });
         res.set("Cache-Control", "no-store");
