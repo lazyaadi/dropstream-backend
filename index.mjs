@@ -444,6 +444,7 @@ async function saveRoomToDB(workspaceName) {
           tasks: ws.tasks || [],
           history: ws.history || [],
           members: ws.members || [],
+          mentions: Array.isArray(ws.mentions) ? ws.mentions : [],
           updatedAt: new Date().toISOString(),
         }
       },
@@ -474,6 +475,7 @@ async function loadRoomFromDB(workspaceName) {
         tasks: doc.tasks || [],
         history: doc.history || [],
         members: doc.members || [],
+        mentions: Array.isArray(doc.mentions) ? doc.mentions : [],
         sockets: new Map(),
       };
     }
@@ -1749,6 +1751,7 @@ if (!isCreating) {
           tasks: [],
           history: [],
           members: [],
+          mentions: [],
           sockets: new Map(),
         };
         await saveRoomToDB(workspaceName);
@@ -2021,6 +2024,20 @@ if (!isCreating) {
     const wasTaskListTooLong = rawTasks.length > MAX_TASKS_PER_BOARD;
     const sanitizedTasks = rawTasks.slice(0, MAX_TASKS_PER_BOARD).map(sanitizeTask).filter(Boolean);
 
+    
+    // Only admins may remove tasks (a delete = an existing id missing from the new list).
+    if (user.role !== "admin") {
+      const nextIds = new Set(sanitizedTasks.map((t) => t?.id).filter((id) => typeof id === "string"));
+      const removesTask = (Array.isArray(ws.tasks) ? ws.tasks : []).some(
+        (t) => typeof t?.id === "string" && !nextIds.has(t.id)
+      );
+      if (removesTask) {
+        socket.emit("permission_denied", "Only admins can delete tasks. Your board was refreshed.");
+        socket.emit("receive_update", { tasks: ws.tasks, history: ws.history, silent: true });
+        return;
+      }
+    }
+
     if (newImageCandidates.length) {
       let senderIsPro = false;
       if (user.email) {
@@ -2040,7 +2057,14 @@ if (!isCreating) {
       if (totalRejected) socket.emit("task_image_rejected", rejectedImages);
     }
 
+    const prevTasks = Array.isArray(ws.tasks) ? ws.tasks : [];
     ws.tasks = sanitizedTasks;
+
+    try {
+      await applyMentions(ws, user, prevTasks, sanitizedTasks);
+    } catch (err) {
+      console.error("[mentions] error:", err?.message);
+    }
 
     if (truncatedTitleCount || truncatedDescCount || droppedInvalidCount || wasTaskListTooLong) {
       socket.emit("task_field_truncated", {
@@ -2555,7 +2579,7 @@ app.post(
         res.set("Retry-After", String(retryAfterSec));
         return res.status(429).json({ code: "rate_busy", error: "Voice is busy right now. Try again in a few seconds.", retryAfterSec });
       }
-      
+
       try {
         const text = await transcribeAudio({ audio, mime: req.voiceMime });
         res.set("Cache-Control", "no-store");

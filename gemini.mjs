@@ -237,6 +237,130 @@ export async function transcribeAudio({ audio, mime }) {
     clearTimeout(timer);
   }
 
+  // ───────────── @Mentions (Pro only, parsed on the server) ─────────────
+const MENTIONS_MAX_PER_SAVE = 5;
+const MENTIONS_PER_MIN = 10;
+const MENTIONS_MAX_STORED_PER_USER = 100;
+
+function buildMentionIndex(ws) {
+  const nameMap = new Map(); // lowercase name -> Set(emails)
+  for (const m of Array.isArray(ws?.members) ? ws.members : []) {
+    const email = normalizeEmail(m?.email);
+    if (!email) continue;
+    for (const n of [m?.displayName, m?.name]) {
+      const s = typeof n === "string" ? n.trim().toLowerCase() : "";
+      if (!s || s.length > 60) continue;
+      if (!nameMap.has(s)) nameMap.set(s, new Set());
+      nameMap.get(s).add(email);
+    }
+  }
+  const namesByLen = [...nameMap.keys()].sort((a, b) => b.length - a.length);
+  return { nameMap, namesByLen };
+}
+
+// "@" must start the text or follow whitespace. Longest member name wins and must end at a non-letter.
+// A name shared by two members is ambiguous, so nobody is mentioned.
+function extractMentionEmails(text, nameMap, namesByLen) {
+  const found = new Set();
+  if (typeof text !== "string" || !text.includes("@")) return found;
+  const lower = text.toLowerCase();
+  let ats = 0;
+  for (let i = 0; i < lower.length && ats < 20; i++) {
+    if (lower[i] !== "@") continue;
+    ats++;
+    if (i > 0 && !/\s/.test(lower[i - 1])) continue;
+    for (const name of namesByLen) {
+      if (!lower.startsWith(name, i + 1)) continue;
+      const next = lower[i + 1 + name.length];
+      if (next && /[\p{L}\p{N}_]/u.test(next)) continue;
+      const emails = nameMap.get(name);
+      if (emails && emails.size === 1) found.add([...emails][0]);
+      break;
+    }
+  }
+  return found;
+}
+
+function mentionTextOf(t) {
+  const title = typeof t?.title === "string" ? t.title : "";
+  const desc = typeof t?.description === "string" ? t.description : "";
+  return `${title}\n${desc}`;
+}
+
+function trimMentionsFor(ws, email) {
+  let mine = ws.mentions.filter((m) => m.toEmail === email);
+  while (mine.length > MENTIONS_MAX_STORED_PER_USER) {
+    const victim = mine.find((m) => m.read) || mine[0];
+    ws.mentions = ws.mentions.filter((m) => m !== victim);
+    mine = mine.filter((m) => m !== victim);
+  }
+}
+
+// Returns the Set of recipient emails that got a NEW mention (used for live push in step 2).
+async function applyMentions(ws, sender, prevTasks, nextTasks) {
+  if (!Array.isArray(ws.mentions)) ws.mentions = [];
+  const recipients = new Set();
+
+  // 1) Mentions of deleted tasks are removed.
+  const liveIds = new Set(nextTasks.map((t) => t?.id).filter((id) => typeof id === "string"));
+  if (ws.mentions.length) ws.mentions = ws.mentions.filter((m) => liveIds.has(m?.taskId));
+
+  // 2) New mentions: only @names that are new compared to the old text.
+  const senderEmail = normalizeEmail(sender?.email);
+  if (!senderEmail) return recipients;
+  const { nameMap, namesByLen } = buildMentionIndex(ws);
+  if (!namesByLen.length) return recipients;
+
+  const prevById = new Map();
+  for (const t of prevTasks) if (t && typeof t.id === "string") prevById.set(t.id, t);
+
+  const candidates = [];
+  scan:
+  for (const t of nextTasks) {
+    if (typeof t?.id !== "string" || t.id.length > 100) continue;
+    const prev = prevById.get(t.id);
+    if (prev && prev.title === t.title && prev.description === t.description) continue;
+    const nowSet = extractMentionEmails(mentionTextOf(t), nameMap, namesByLen);
+    if (!nowSet.size) continue;
+    const prevSet = prev ? extractMentionEmails(mentionTextOf(prev), nameMap, namesByLen) : new Set();
+    for (const email of nowSet) {
+      if (email === senderEmail || prevSet.has(email)) continue;
+      if (ws.mentions.some((m) => m.taskId === t.id && m.toEmail === email)) continue;
+      candidates.push({ task: t, email });
+      if (candidates.length >= MENTIONS_MAX_PER_SAVE) break scan;
+    }
+  }
+  if (!candidates.length) return recipients;
+
+  // 3) Only a Pro sender creates mentions (Free: the @name stays plain text).
+  let senderPro = false;
+  try {
+    const profile = await getHydratedUserProfile(senderEmail);
+    senderPro = profile?.isPro === true;
+  } catch {
+    senderPro = false;
+  }
+  if (!senderPro) return recipients;
+
+  const fromName = String(sender.displayName || sender.name || "").slice(0, 60);
+  for (const { task, email } of candidates) {
+    const rl = await countWindowedAction(`mention:${senderEmail}`, 60 * 1000, MENTIONS_PER_MIN);
+    if (!rl.allowed) break;
+    if (!Array.isArray(ws.tasks) || !ws.tasks.some((t) => t?.id === task.id)) continue; // deleted meanwhile
+    ws.mentions.push({
+      id: `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`,
+      taskId: task.id,
+      taskTitle: String(task.title || "").slice(0, 200),
+      fromName,
+      toEmail: email,
+      createdAt: new Date().toISOString(),
+      read: false,
+    });
+    trimMentionsFor(ws, email);
+    recipients.add(email);
+  }
+  return recipients;
+}
   if (!resp.ok) {
     const status = data?.error?.status;
     console.error("[gemini:transcribe] HTTP", resp.status, status, data?.error?.message);
