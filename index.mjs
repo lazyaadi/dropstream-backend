@@ -1833,6 +1833,7 @@ if (!isCreating) {
 
     broadcastUsers(workspaceName);
     broadcastMembers(workspaceName);
+    pushMentionsTo(workspaceName, ws, new Set([normalizeEmail(email)])).catch(() => {});
   }));
 
   socket.on("rejoin_workspace", withSocketGuard(socket, "rejoin_workspace", async (data = {}) => {
@@ -1934,6 +1935,7 @@ if (!isCreating) {
 
     broadcastUsers(workspaceName);
     broadcastMembers(workspaceName);
+        pushMentionsTo(workspaceName, ws, new Set([normalizeEmail(email)])).catch(() => {});
   }));
 
   socket.on("update_tasks", withSocketGuard(socket, "update_tasks", async ({ workspaceName, updatedTasks, actionMeta, newTaskId } = {}) => {
@@ -2060,8 +2062,9 @@ if (!isCreating) {
     const prevTasks = Array.isArray(ws.tasks) ? ws.tasks : [];
     ws.tasks = sanitizedTasks;
 
+    let mentionAffected = new Set();
     try {
-      await applyMentions(ws, user, prevTasks, sanitizedTasks);
+      mentionAffected = await applyMentions(ws, user, prevTasks, sanitizedTasks);
     } catch (err) {
       console.error("[mentions] error:", err?.message);
     }
@@ -2092,6 +2095,12 @@ if (!isCreating) {
     }
 
     await saveRoomToDB(safeWorkspaceName);
+    
+    try {
+      await pushMentionsTo(safeWorkspaceName, ws, mentionAffected);
+    } catch (err) {
+      console.error("[mentions] push error:", err?.message);
+    }
 
    io.to(safeWorkspaceName).emit("receive_update", {
       tasks: ws.tasks,
@@ -2100,6 +2109,28 @@ if (!isCreating) {
 
     io.to(safeWorkspaceName).emit("history_update", ws.history);
   }));
+
+  socket.on("mentions_mark_read", withSocketGuard(socket, "mentions_mark_read", async ({ workspaceName } = {}) => {
+    const safeWorkspaceName = normalizeText(workspaceName);
+    const ws = workspaces[safeWorkspaceName];
+    if (!ws || !ws.sockets.get(socket.id)) return;
+    const email = verifiedEmailOfSocket(socket);
+    if (!email) return;
+    const isMember = Array.isArray(ws.members) && ws.members.some((m) => normalizeEmail(m?.email) === email);
+    if (!isMember) return;
+    const rl = await countWindowedAction(`mention_read:${email}`, 60 * 1000, MENTIONS_MARK_READ_PER_MIN);
+    if (!rl.allowed) return;
+
+    let changed = false;
+    for (const m of Array.isArray(ws.mentions) ? ws.mentions : []) {
+      if (m && m.toEmail === email && !m.read) { m.read = true; changed = true; }
+    }
+    if (changed) await saveRoomToDB(safeWorkspaceName);
+    await pushMentionsTo(safeWorkspaceName, ws, new Set([email]));
+  }));
+
+
+
 
   socket.on("check_task_limit", async ({ email } = {}) => {
     if (!email) return;
@@ -2316,13 +2347,18 @@ async function applyMentions(ws, sender, prevTasks, nextTasks) {
 
   // 1) Mentions of deleted tasks are removed.
   const liveIds = new Set(nextTasks.map((t) => t?.id).filter((id) => typeof id === "string"));
-  if (ws.mentions.length) ws.mentions = ws.mentions.filter((m) => liveIds.has(m?.taskId));
+  if (ws.mentions.length) {
+    for (const m of ws.mentions) {
+      if (!liveIds.has(m?.taskId) && m?.toEmail) recipients.add(m.toEmail); // their list changed
+    }
+    ws.mentions = ws.mentions.filter((m) => liveIds.has(m?.taskId));
+  }
 
   // 2) New mentions: only @names that are new compared to the old text.
   const senderEmail = normalizeEmail(sender?.email);
-  if (!senderEmail) { console.log("[mentions] stop: no sender email"); return recipients; }
+  if (!senderEmail) return recipients;
   const { nameMap, namesByLen } = buildMentionIndex(ws);
-  console.log("[mentions] member names indexed:", namesByLen.length);
+
   if (!namesByLen.length) return recipients;
 
   const prevById = new Map();
@@ -2344,7 +2380,7 @@ async function applyMentions(ws, sender, prevTasks, nextTasks) {
       if (candidates.length >= MENTIONS_MAX_PER_SAVE) break scan;
     }
   }
-  console.log("[mentions] candidates found:", candidates.length);
+
   if (!candidates.length) return recipients;
 
   // 3) Only a Pro sender creates mentions (Free: the @name stays plain text).
@@ -2355,7 +2391,7 @@ async function applyMentions(ws, sender, prevTasks, nextTasks) {
   } catch {
     senderPro = false;
   }
-  console.log("[mentions] senderPro:", senderPro);
+ 
   if (!senderPro) return recipients;
 
   const fromName = String(sender.displayName || sender.name || "").slice(0, 60);
@@ -2377,6 +2413,62 @@ async function applyMentions(ws, sender, prevTasks, nextTasks) {
   }
   return recipients;
 }
+
+// ---- Mentions: live push + unread state (Pro only, own entries only) ----
+const MENTIONS_MARK_READ_PER_MIN = 20;
+
+// Verified identity of a socket: session cookie first, then the email set at login (socket.data.verifiedEmail).
+function verifiedEmailOfSocket(sock) {
+  try {
+    return (
+      normalizeEmail(getVerifiedSessionEmail(sock?.handshake?.headers?.cookie || "") || "") ||
+      normalizeEmail(sock?.data?.verifiedEmail || "")
+    );
+  } catch {
+    return "";
+  }
+}
+
+// Only this user's own entries, newest first. Never includes emails.
+function mentionsPayloadFor(ws, email) {
+  const mine = (Array.isArray(ws.mentions) ? ws.mentions : [])
+    .filter((m) => m && m.toEmail === email)
+    .sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)))
+    .slice(0, MENTIONS_MAX_STORED_PER_USER)
+    .map((m) => ({
+      id: m.id,
+      taskId: m.taskId,
+      taskTitle: m.taskTitle,
+      fromName: m.fromName,
+      createdAt: m.createdAt,
+      read: !!m.read,
+    }));
+  return { unread: mine.filter((m) => !m.read).length, items: mine };
+}
+
+// Sends mentions_update to the sockets of the given emails (verified email only), Pro users only.
+async function pushMentionsTo(workspaceName, ws, emails) {
+  if (!ws || !emails || !emails.size) return;
+  const proCache = new Map();
+  for (const sid of ws.sockets.keys()) {
+    const sock = io.sockets.sockets.get(sid);
+    if (!sock) continue;
+    const email = verifiedEmailOfSocket(sock);
+    if (!email || !emails.has(email)) continue;
+    if (!proCache.has(email)) {
+      let pro = false;
+      try {
+        pro = (await getHydratedUserProfile(email))?.isPro === true;
+      } catch {
+        pro = false;
+      }
+      proCache.set(email, pro);
+    }
+    if (!proCache.get(email)) continue;
+    sock.emit("mentions_update", mentionsPayloadFor(ws, email));
+  }
+}
+
 
 // ───────────── AI chat (Gemini, read-only) ─────────────
 const AI_PER_MIN = Number(process.env.AI_PER_MIN) || 6;
