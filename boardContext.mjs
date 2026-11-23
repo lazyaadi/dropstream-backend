@@ -1,6 +1,4 @@
-// server/boardContext.mjs
-// Turns a workspace object into a compact, safe text snapshot for the AI.
-// Pure function: no DB calls, no side effects.
+
 
 const STATUS_LABELS = { todo: "To Do", "in-progress": "In Progress", done: "Done" };
 const PRIORITY_LABELS = { low: "Low", medium: "Medium", high: "High" };
