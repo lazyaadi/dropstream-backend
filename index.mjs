@@ -1689,12 +1689,24 @@ io.on("connection", (socket) => {
     const projectName = normalizeText(data.projectName);
     const explicitName = normalizeText(data.name || data.userName);
     const isCreating = !!data.isCreating;
-    const rawEmail = data.userEmail ?? data.email ?? data?.user?.email ?? "";
-    const email = normalizeEmail(rawEmail);
-    const userName = explicitName || (email.includes("@") ? email.split("@")[0] : normalizeText(data.userName));
-    
+       const claimedEmail = normalizeEmail(
+      data.userEmail ?? data.email ?? data?.user?.email ?? ""
+    );
+
+    const email = verifiedEmailOfSocket(socket);
+
+    if (!email) {
+      return socket.emit("session_expired", { reason: "no_session" });
+    }
+
+    if (claimedEmail && claimedEmail !== email) {
+      console.warn("[join_workspace] Client email does not match authenticated identity.");
+      return socket.emit("error_msg", "Your session identity does not match. Please sign in again.");
+    }
+
+    const userName = explicitName || email.split("@")[0];
+
     const lockoutScope = email || workspaceName;
-    const lockoutState = await getJoinLockoutState(lockoutScope);
     if (lockoutState.locked) {
       return socket.emit("join_locked_out", { unlockAt: lockoutState.unlockAt });
     }
@@ -1766,9 +1778,8 @@ if (!isCreating) {
     const storedCreatorEmail = normalizeEmail(ws.creatorEmail);
 
     let role = "member";
-    if (isCreating) {
-      role = "admin";
-    } else if (storedCreatorEmail && storedCreatorEmail === normalizedUserEmail) {
+
+    if (storedCreatorEmail && storedCreatorEmail === normalizedUserEmail) {
       role = "admin";
     }
 
