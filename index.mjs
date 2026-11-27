@@ -1707,6 +1707,7 @@ io.on("connection", (socket) => {
     const userName = explicitName || email.split("@")[0];
 
     const lockoutScope = email || workspaceName;
+    const lockoutState = await getJoinLockoutState(lockoutScope);
     if (lockoutState.locked) {
       return socket.emit("join_locked_out", { unlockAt: lockoutState.unlockAt });
     }
